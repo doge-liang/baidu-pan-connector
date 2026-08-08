@@ -1,0 +1,17 @@
+{
+  "schema": "baidu-pan-task-pack/v1",
+  "id": "example-upload-edit-paths-first",
+  "title": "Example upload — edit local/dest before push",
+  "tasks": [
+    {
+      "id": "u1",
+      "op": "upload",
+      "local": "C:\\\\path\\\\to\\\\file.pdf",
+      "dest": "/apps/baidu-pan-connector-example",
+      "newname": "file.pdf",
+      "ondup": "fail",
+      "risk": "medium",
+      "title": "example upload"
+    }
+  ]
+}

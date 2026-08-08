@@ -1,0 +1,11 @@
+# Runtime / local only
+state/
+crawl-cache/
+index-out/
+**/__pycache__/
+*.pyc
+.DS_Store
+*.log
+.tasks-private/
+skills/baidu-pan-connector/state/
+skills/baidu-pan-connector/crawl-cache/

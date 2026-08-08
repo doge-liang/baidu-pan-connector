@@ -1,0 +1,281 @@
+#bpt-root {
+  all: initial;
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  z-index: 2147483646;
+  width: 640px;
+  max-width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 96px);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: #1a1a1a;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid #d8d8d8;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#bpt-root.bpt-collapsed {
+  width: auto;
+  max-height: none;
+}
+
+#bpt-root * {
+  box-sizing: border-box;
+}
+
+.bpt-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #0f6cbd;
+  color: #fff;
+  cursor: move;
+  user-select: none;
+}
+
+.bpt-header h1 {
+  all: unset;
+  font-weight: 600;
+  font-size: 14px;
+  flex: 1;
+}
+
+.bpt-header button {
+  all: unset;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 12px;
+}
+
+.bpt-header button:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* 日志固定在标题下方，不随任务列表滚动 */
+.bpt-log {
+  flex-shrink: 0;
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  background: #111;
+  color: #d6d6d6;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #333;
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+/* 仅任务区滚动；核准等操作应 patch 卡片，避免 scrollTop 被重置 */
+.bpt-scroll {
+  padding: 10px 12px 12px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.bpt-body {
+  padding: 10px 12px 12px;
+  overflow: auto;
+  flex: 1;
+}
+
+.bpt-meta {
+  color: #555;
+  line-height: 1.45;
+  margin-bottom: 10px;
+  white-space: pre-wrap;
+}
+
+.bpt-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.bpt-toolbar button,
+.bpt-task-actions button {
+  all: unset;
+  cursor: pointer;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid #cfcfcf;
+  background: #f6f6f6;
+  font-size: 12px;
+}
+
+.bpt-toolbar button:hover,
+.bpt-task-actions button:hover {
+  background: #ececec;
+}
+
+.bpt-toolbar button.primary {
+  background: #0f6cbd;
+  border-color: #0f6cbd;
+  color: #fff;
+}
+
+.bpt-toolbar button.danger {
+  background: #b10e1e;
+  border-color: #b10e1e;
+  color: #fff;
+}
+
+.bpt-toolbar button:disabled,
+.bpt-task-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.bpt-task {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: #fafafa;
+}
+
+.bpt-task.risk-high {
+  border-color: #e0a0a6;
+  background: #fff7f7;
+}
+
+.bpt-task.approved {
+  border-color: #8ec99a;
+  background: #f3fbf5;
+}
+
+.bpt-task.rejected {
+  opacity: 0.55;
+}
+
+.bpt-task.done {
+  border-color: #7bb8e8;
+  background: #f3f8fd;
+}
+
+.bpt-task.failed {
+  border-color: #d94c5a;
+  background: #fff0f1;
+}
+
+.bpt-task-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.bpt-task-op {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-right: 6px;
+  background: #e8eef5;
+  color: #234;
+}
+
+.bpt-task-op.op-delete {
+  background: #f8d7da;
+  color: #842029;
+}
+
+.bpt-task-op.op-copy {
+  background: #d1e7dd;
+  color: #0f5132;
+}
+
+.bpt-task-op.op-rename {
+  background: #fff3cd;
+  color: #664d03;
+}
+
+.bpt-task-op.op-move {
+  background: #cfe2ff;
+  color: #084298;
+}
+
+.bpt-task-path {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #333;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  margin: 4px 0;
+  max-height: 7.2em;
+  overflow-y: auto;
+}
+
+.bpt-task-reason {
+  color: #666;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.bpt-task-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bpt-status {
+  font-size: 11px;
+  color: #666;
+  margin-top: 4px;
+}
+
+/* 旧 .bpt-log 块样式已上移到面板顶端固定区 */
+
+.bpt-empty {
+  color: #777;
+  padding: 16px 4px;
+  line-height: 1.5;
+}
+
+.bpt-index-box {
+  border: 1px solid #c5d8ec;
+  background: #f4f8fc;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.bpt-index-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.bpt-index-desc {
+  font-size: 11px;
+  color: #555;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+
+.bpt-index-hint {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  color: #333;
+  margin-top: 4px;
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.bpt-select {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+}
