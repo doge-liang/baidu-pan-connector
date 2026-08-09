@@ -4,9 +4,9 @@
 默认监听 127.0.0.1:27865。只接受本机回环，不写 bdstoken / Cookie。
 # 注：17865 常落在 Windows Hyper-V/WSL 动态保留段（约 14k–18k）内导致 bind 10013。
 
-用法（脚本在 scripts/baidu-pan-tools/，勿放进扩展目录，以免生成 __pycache__ 导致 Chrome 无法加载）:
-  python scripts/baidu-pan-tools/bridge.py
-  python scripts/baidu-pan-tools/pan_task.py push tasks/xxx.json --auto --wait
+用法（Python 工具不得放进扩展目录）:
+  python -B tools/bridge.py
+  python -B tools/pan_task.py push <runtime>/tasks/xxx.json --auto --wait
 
 扩展端点:
   GET  /health /pending /history /index/status /run/status
@@ -37,7 +37,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
+
+from runtime_paths import ensure_runtime_dirs, runtime_root
 
 HOST = "127.0.0.1"
 PORT = 27865
@@ -45,7 +47,7 @@ PORT = 27865
 import os
 
 # Skill layout:  …/baidu-pan-connector/tools/bridge.py
-#                …/baidu-pan-connector/state|crawl-cache|extension
+# Runtime data:  BAIDU_PAN_CONNECTOR_STATE_DIR or ~/.codex/state/baidu-pan-connector
 # Optional vault (for index rebuild only): env BAIDU_PAN_VAULT or KNOWLEDGE_VAULT
 _TOOLS_DIR = Path(__file__).resolve().parent
 _SKILL_ROOT = _TOOLS_DIR.parent
@@ -64,18 +66,18 @@ else:
 _INDEX_PY = (
     (_VAULT / "scripts" / "baidu-pan-index.py") if _VAULT is not None else Path()
 )
+_RUNTIME_ROOT = runtime_root()
+_RUNTIME_PATHS = ensure_runtime_dirs(_RUNTIME_ROOT)
 _OUT = (
     (_VAULT / "5-External" / "baidu-pan")
     if _VAULT is not None
-    else (_SKILL_ROOT / "index-out")
+    else _RUNTIME_PATHS["index_out"]
 )
-# State/cache live beside tools (skill root), NEVER inside extension/ (Chrome rejects __pycache__ / _*)
-_CACHE_DIR = _SKILL_ROOT / "crawl-cache"
+# State/cache remain outside the source and extension trees.
+_CACHE_DIR = _RUNTIME_PATHS["crawl_cache"]
 _CRAWL_JSON = _CACHE_DIR / "baidu-pan-crawl.json"
-_STATE_DIR = _SKILL_ROOT / "state"
+_STATE_DIR = _RUNTIME_ROOT
 _STATE_FILE = _STATE_DIR / "packs.json"
-_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 _lock = threading.Lock()
 _pending: dict[str, dict[str, Any]] = {}
@@ -573,7 +575,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("X-File-Name", rec["name"])
+            # BaseHTTPRequestHandler encodes response headers as Latin-1. Raw
+            # Chinese filenames therefore terminate the connection before the
+            # binary body is sent. Preserve the metadata using RFC 3986-safe
+            # percent encoding; upload clients do not otherwise depend on it.
+            self.send_header("X-File-Name", quote(rec["name"], safe=""))
             self.send_header("X-File-Size", str(size))
             self.send_header("X-Content-MD5", rec["content_md5"])
             self._cors()
@@ -965,6 +971,7 @@ def main() -> None:
     httpd.request_queue_size = 16
     print(f"[bridge] listening on http://{args.host}:{args.port}")
     print(f"[bridge] skill_root={_SKILL_ROOT}")
+    print(f"[bridge] runtime_root={_RUNTIME_ROOT}")
     print(f"[bridge] vault={_VAULT}")
     print(f"[bridge] index={_INDEX_PY}")
     print(f"[bridge] out={_OUT}")

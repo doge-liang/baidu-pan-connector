@@ -1,115 +1,96 @@
 # baidu-pan-connector
 
-**Baidu Netdisk Agent Connector** — Chrome extension + local bridge CLI so coding agents (Codex, Claude Code, etc.) can **list / search / mkdir / move / rename / copy / delete / upload** on a logged-in [pan.baidu.com](https://pan.baidu.com) session.
+Baidu Netdisk Agent Connector combines a Codex skill, a local loopback bridge,
+and an unpacked Chrome extension. It can list, search, create, move, rename,
+copy, delete, and upload files through an already logged-in `pan.baidu.com`
+session.
 
-Unofficial. Not affiliated with Baidu. Does **not** store cookies or `bdstoken`.
+This is unofficial software and is not affiliated with Baidu. It does not
+persist browser cookies or `bdstoken` values.
 
-## Install skill (Codex / skills CLI)
+## Source of truth
 
-```bash
-# Codex / agents that support `skills add`
-npx skills add https://github.com/doge-liang/baidu-pan-connector/skills --skill baidu-pan-connector
-```
-
-Or copy `skills/baidu-pan-connector` into `~/.codex/skills/baidu-pan-connector`.
-
-## One-time setup
-
-1. **Bridge** (keep running):
-
-```powershell
-python %USERPROFILE%\.codex\skills\baidu-pan-connector\tools\bridge.py
-# or from this repo after install:
-python skills/baidu-pan-connector/tools/bridge.py
-```
-
-2. **Chrome extension** — Load unpacked:
-
-```text
-…/baidu-pan-connector/extension
-```
-
-`chrome://extensions` → Developer mode → Load unpacked → select `extension/`.
-
-3. Open https://pan.baidu.com and stay logged in (keep the tab open).
-
-4. **Install check**:
-
-```powershell
-python …/baidu-pan-connector/scripts/check_install.py
-```
-
-Expect `RESULT: PASS` and ideally `pan RPC responded`.
-
-## Everyday commands
-
-```powershell
-$S = "$env:USERPROFILE\.codex\skills\baidu-pan-connector"
-python "$S\tools\pan_task.py" health
-python "$S\tools\pan_query.py" list "/" --max 20
-python "$S\tools\pan_query.py" search "关键词" --dir "/"
-python "$S\tools\pan_query.py" upload "D:\local\file.pdf" --dest "/remote/dir"
-python "$S\tools\pan_task.py" push "$S\tasks\my.json" --auto --wait
-```
-
-### Task pack example
-
-```json
-{
-  "schema": "baidu-pan-task-pack/v1",
-  "id": "demo-move",
-  "title": "move demo",
-  "tasks": [
-    {
-      "id": "t1",
-      "op": "move",
-      "path": "/a/file.pdf",
-      "dest": "/b",
-      "newname": "file.pdf",
-      "risk": "low"
-    }
-  ]
-}
-```
-
-Supported `op`: `mkdir` | `move` | `rename` | `copy` | `copy-batch` | `delete` | `upload` | `normalize-dir`.
-
-### Upload
-
-```powershell
-python "$S\tools\pan_query.py" upload "D:\path\file.pdf" --dest "/inbox"
-python "$S\tools\pan_query.py" upload "D:\path\file.pdf" --path "/inbox/file.pdf" --ondup overwrite
-```
-
-Bridge registers the local file (MD5 + 4 MiB blocks); the extension uploads with the web session (`precreate` → PCS parts → `create`).
-
-## Layout
+The complete product lives under:
 
 ```text
 skills/baidu-pan-connector/
-  SKILL.md                 # agent instructions
-  INSTALL.md
-  VERSION
-  extension/               # Chrome MV3 (Load unpacked here only)
-  tools/                   # bridge.py, pan_task.py, pan_query.py
-  scripts/check_install.py
-  tasks/                   # your packs (examples only in repo)
+  SKILL.md
+  agents/openai.yaml
+  extension/
+  tools/
+  scripts/
   references/
+  tasks/                 examples only
 ```
 
-Do **not** run Python inside `extension/` (Chrome rejects `__pycache__`).
+Do not maintain a second extension or skill source tree. On a development
+machine, point the Codex skill installation at this directory and load Chrome
+directly from `skills/baidu-pan-connector/extension`.
 
-## vs baidu-drive
+## Windows development installation
 
-| | baidu-pan-connector | [baidu-drive](https://github.com/baidu-netdisk/bdpan-storage) |
-|---|---|---|
-| Transport | Extension + bridge | `bdpan` OpenAPI CLI |
-| Scope | Full tree of the logged-in account | Often `/apps/bdpan/` |
-| Upload | Yes | Yes |
-| Download / transfer / share | No | Yes |
+Clone the repository to a stable path, for example:
 
-Agent behavior patterns (confirm matrix, safety notes) are adapted from baidu-drive; see `SOURCES.md` inside the skill.
+```powershell
+git clone https://github.com/doge-liang/baidu-pan-connector.git D:\project\baidu-pan-connector
+```
+
+Use a directory link for the Codex installation or deploy with the controlled
+sync script. The link keeps the installed Skill and repository source identical.
+
+```powershell
+$source = 'D:\project\baidu-pan-connector\skills\baidu-pan-connector'
+$install = Join-Path $env:USERPROFILE '.codex\skills\baidu-pan-connector'
+New-Item -ItemType Junction -Path $install -Target $source
+```
+
+Load this unpacked extension in Chrome:
+
+```text
+D:\project\baidu-pan-connector\skills\baidu-pan-connector\extension
+```
+
+Runtime data is external to Git:
+
+```text
+%USERPROFILE%\.codex\state\baidu-pan-connector\
+  tasks\
+  logs\
+  cache\
+  index-out\
+  packs.json
+```
+
+Set `BAIDU_PAN_CONNECTOR_STATE_DIR` to an absolute path to override the default.
+
+## Start and verify
+
+```powershell
+$S = Join-Path $env:USERPROFILE '.codex\skills\baidu-pan-connector'
+powershell -File "$S\scripts\start_connector.ps1" -Background
+python -B "$S\scripts\check_install.py"
+python -B "$S\scripts\sync_install.py" --check
+```
+
+Everyday commands:
+
+```powershell
+$TOOLS = Join-Path $S 'tools'
+$TASKS = Join-Path $env:USERPROFILE '.codex\state\baidu-pan-connector\tasks'
+python -B "$TOOLS\pan_task.py" health
+python -B "$TOOLS\pan_query.py" list '/' --max 20
+python -B "$TOOLS\pan_query.py" search '关键词' --dir '/'
+python -B "$TOOLS\pan_query.py" upload 'D:\local\file.pdf' --dest '/remote/dir'
+python -B "$TOOLS\pan_task.py" push "$TASKS\my.json" --auto --wait
+```
+
+## Safety and publication
+
+- Keep real task packs, bridge state, logs, caches, and generated indexes out of Git.
+- Do not run Python inside `extension/`; Chrome rejects generated underscore-prefixed paths such as `__pycache__`.
+- Keep the browser extension status-only. User confirmation and task control belong in the Agent and CLI workflow.
+- Build the Chrome Web Store package with `extension/store/pack.py`; the package contains only extension runtime files and icons.
 
 ## License
 
-Apache-2.0. Unofficial third-party connector.
+Apache-2.0. See `LICENSE` and `skills/baidu-pan-connector/SOURCES.md`.

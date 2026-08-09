@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Baidu Pan Agent Connector</title>
+  <desc id="desc">Cloud synchronization icon based on lucide:cloud-sync.</desc>
+  <defs>
+    <linearGradient id="connector-blue" x1="80" y1="64" x2="432" y2="448" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#174F82" />
+      <stop offset="1" stop-color="#2B82E6" />
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#connector-blue)" />
+  <g
+    transform="translate(96 96) scale(13.333333)"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="2.4"
+  >
+    <path d="m17 18-1.535 1.605a5 5 0 0 1-8-1.5" />
+    <path d="M17 22v-4h-4m7.996-2.749A4.5 4.5 0 0 0 17.495 8h-1.79a7 7 0 1 0-12.709 5.607" />
+    <path d="M7 10v4h4" />
+    <path d="m7 14 1.535-1.605a5 5 0 0 1 8 1.5" />
+  </g>
+</svg>

@@ -1,0 +1,20 @@
+# 本机运行状态和网盘索引可能包含用户路径或私有文件名。
+state/
+crawl-cache/
+index-out/
+
+# 真实任务包不进入仓库，只保留结构占位和无敏感信息的示例。
+tasks/*
+!tasks/.gitkeep
+!tasks/example-mkdir.json
+!tasks/example-upload.json
+
+# Python 和扩展构建产物。
+**/__pycache__/
+*.py[cod]
+extension/dist/*
+!extension/dist/.gitkeep
+
+# 常见本机杂项。
+*.log
+.DS_Store

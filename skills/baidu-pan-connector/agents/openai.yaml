@@ -1,0 +1,4 @@
+interface:
+  display_name: "Baidu Pan Connector"
+  short_description: "Manage Baidu Netdisk through the local Connector"
+  default_prompt: "Use $baidu-pan-connector to inspect and organize files in my Baidu Netdisk."

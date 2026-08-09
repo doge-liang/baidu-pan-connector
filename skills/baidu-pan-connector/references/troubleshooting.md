@@ -3,10 +3,10 @@
 ## Install check first
 
 ```powershell
-python "$env:USERPROFILE\.codex\skills\baidu-pan-connector\scripts\check_install.py"
+python -B "$env:USERPROFILE\.codex\skills\baidu-pan-connector\scripts\check_install.py"
 ```
 
-Human steps: [INSTALL.md](../INSTALL.md).
+Human steps: [install.md](./install.md).
 
 ## Bridge unreachable
 
@@ -17,18 +17,18 @@ Cannot connect to bridge (http://127.0.0.1:27865)
 1. Start the **skill-bundled** bridge and leave it running:
 
 ```powershell
-python "$env:USERPROFILE\.codex\skills\baidu-pan-connector\tools\bridge.py"
+powershell -File "$env:USERPROFILE\.codex\skills\baidu-pan-connector\scripts\start_connector.ps1"
 ```
 
-2. Confirm nothing else is bound to **27865** (older notes may mention 17865; current default is 27865).  
+2. Confirm nothing else is bound to **27865** (older notes may mention 17865; current default is 27865).
 3. Bridge is loopback-only by design.
-4. State dir: `…/baidu-pan-connector/state/` (not inside `extension/`).
+4. State dir: `%USERPROFILE%\.codex\state\baidu-pan-connector` (not inside the source or extension tree).
 
 ## waiting_tab / RPC no reply
 
-- No open https://pan.baidu.com session tab  
-- Tab slept or crashed → refresh / reopen  
-- Extension not loaded (Developer mode → Load unpacked)  
+- No open https://pan.baidu.com session tab
+- Tab slept or crashed → refresh / reopen
+- Extension not loaded (Developer mode → Load unpacked)
 - Extension too old for `--auto` (need 0.3.0+; prefer 0.4.0+)
 
 ## Extension fails to load
@@ -39,28 +39,38 @@ python "$env:USERPROFILE\.codex\skills\baidu-pan-connector\tools\bridge.py"
 %USERPROFILE%\.codex\skills\baidu-pan-connector\extension
 ```
 
-- Do not run Python inside `extension/` (avoids `__pycache__`)  
-- Do not place `_`-prefixed paths in the extension root (Chrome rejects them)  
-- CLI lives in sibling `tools/`, task JSON in `tasks/`
+- Do not run Python inside `extension/` (avoids `__pycache__`)
+- Do not place `_`-prefixed paths in the extension root (Chrome rejects them)
+- CLI lives in sibling `tools/`; private task JSON lives in the external runtime `tasks/` directory
+
+## `Extension context invalidated` after Reload
+
+Chrome invalidates every content-script context created by the previous extension instance
+when the extension is reloaded. The Connector stops its bridge and RPC polling, changes the
+panel to the red state, and asks for a page refresh instead of continuing to throw errors.
+
+Refresh the existing `https://pan.baidu.com/` tab once after every extension reload. This
+creates a new content-script context from the reloaded extension; reloading the extension
+alone cannot replace a script that is already running in an open page.
 
 ## Push accepted but nothing runs
 
-1. `pan_task.py health`  
-2. `pan_query.py panel-log`  
-3. `pan_task.py status <id>` for `waiting_tab` / `failed` / `needs_human`  
-4. Packs without `--auto` need panel approval  
+1. `pan_task.py health`
+2. `pan_query.py panel-log`
+3. `pan_task.py status <id>` for `waiting_tab` / `failed` / `needs_human`
+4. Packs without `--auto` need panel approval
 5. `--mode safe` holds delete/high
 
 ## list/search empty or timeout
 
-- Smaller dir, lower `--max`  
-- RPC TTL is finite (~minutes); restart bridge and retry  
-- Rate limits: wait and retry  
+- Smaller dir, lower `--max`
+- RPC TTL is finite (~minutes); restart bridge and retry
+- Rate limits: wait and retry
 
 ## partial / task FAIL
 
-- Read `FAIL <task-id>` and error in status output  
-- Common: missing source, missing dest parent, name conflict  
+- Read `FAIL <task-id>` and error in status output
+- Common: missing source, missing dest parent, name conflict
 - `exists` / `list` parent → `mkdir` if needed → retry with a **new pack id** (or same id with new `push_seq` via re-push)
 
 ## crawl / index
@@ -78,6 +88,6 @@ Full-disk crawl is slow and heavy. Run only when the user explicitly wants it. `
 |---|---|---|
 | Stack | Extension + bridge | `bdpan` CLI |
 | Tree | Full account tree | Often app-limited paths |
-| Local upload | Not in connector | Often supported by bdpan |
+| Local upload | Supported through bridge registration and extension 0.5.0+ | Often supported by bdpan |
 
 Pick the stack the user actually has running.
