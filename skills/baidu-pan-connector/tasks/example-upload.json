@@ -6,12 +6,12 @@
     {
       "id": "u1",
       "op": "upload",
-      "local": "C:\\\\path\\\\to\\\\file.pdf",
+      "local": "C:\\\\Users\\\\Public\\\\example.pdf",
       "dest": "/apps/baidu-pan-connector-example",
-      "newname": "file.pdf",
+      "newname": "example.pdf",
       "ondup": "fail",
       "risk": "medium",
-      "title": "example upload"
+      "title": "upload example.pdf"
     }
   ]
 }

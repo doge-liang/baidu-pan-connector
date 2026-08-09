@@ -22,6 +22,11 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 EXT = SKILL_ROOT / "extension"
 TOOLS = SKILL_ROOT / "tools"
+sys.path.insert(0, str(TOOLS))
+
+from runtime_paths import ensure_runtime_dirs, runtime_root  # noqa: E402
+
+RUNTIME_ROOT = runtime_root()
 BRIDGE = "http://127.0.0.1:27865"
 
 REQUIRED_EXT = [
@@ -62,6 +67,7 @@ def http_get(url: str, timeout: float = 5.0) -> dict | None:
 def main() -> int:
     print("Baidu Pan Agent Connector — install check")
     print(f"Skill root: {SKILL_ROOT}")
+    print(f"Runtime root: {RUNTIME_ROOT}")
     print()
 
     hard_fail = False
@@ -91,6 +97,13 @@ def main() -> int:
     else:
         ok("tools/ bridge.py pan_task.py pan_query.py present")
 
+    try:
+        ensure_runtime_dirs(RUNTIME_ROOT)
+        ok(f"runtime state is writable outside source: {RUNTIME_ROOT}")
+    except Exception as e:
+        fail(f"runtime state unavailable: {e}")
+        hard_fail = True
+
     # --- python ---
     print()
     print("2) Python")
@@ -117,7 +130,7 @@ def main() -> int:
     elif health and "_error" in health:
         fail(f"bridge not reachable: {health['_error']}")
         print("     Start with:")
-        print(f"       python \"{TOOLS / 'bridge.py'}\"")
+        print(f"       python -B \"{TOOLS / 'bridge.py'}\"")
         hard_fail = True
     else:
         fail(f"bridge health unexpected: {health}")
@@ -142,7 +155,8 @@ def main() -> int:
             )
             with urllib.request.urlopen(req, timeout=45) as r:
                 out = json.loads(r.read().decode("utf-8"))
-            if out.get("ok") or out.get("status") == "done" or "result" in out or "list" in out:
+            rpc_ok = out.get("ok") is True and out.get("status") in (None, "done")
+            if rpc_ok:
                 ok("pan RPC responded (tab + extension appear active)")
                 # print brief
                 preview = json.dumps(out, ensure_ascii=False)[:240]
@@ -163,18 +177,18 @@ def main() -> int:
         print("RESULT: FAIL — fix items marked [FAIL], then re-run this script.")
         print()
         print("Quick start:")
-        print(f"  python \"{TOOLS / 'bridge.py'}\"")
+        print(f"  python -B \"{TOOLS / 'bridge.py'}\"")
         print(f"  # Chrome → Load unpacked → {EXT}")
         print("  # Open https://pan.baidu.com (logged in)")
-        print(f"  python \"{Path(__file__).resolve()}\"")
+        print(f"  python -B \"{Path(__file__).resolve()}\"")
         return 1
 
     print("RESULT: PASS (package + bridge). If step 5 warned, finish Chrome/tab setup.")
     print()
     print("Everyday commands:")
-    print(f"  python \"{TOOLS / 'pan_task.py'}\" health")
-    print(f"  python \"{TOOLS / 'pan_query.py'}\" list \"/\" --max 20")
-    print(f"  python \"{TOOLS / 'pan_task.py'}\" push <pack.json> --auto --wait")
+    print(f"  python -B \"{TOOLS / 'pan_task.py'}\" health")
+    print(f"  python -B \"{TOOLS / 'pan_query.py'}\" list \"/\" --max 20")
+    print(f"  python -B \"{TOOLS / 'pan_task.py'}\" push <pack.json> --auto --wait")
     return 0
 
 

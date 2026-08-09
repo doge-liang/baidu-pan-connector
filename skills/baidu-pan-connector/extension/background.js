@@ -1,5 +1,5 @@
 // 任务桥 connector：轮询 pending/history，导入 storage；auto 包自动触发 content 执行。
-// CLI 主控：python scripts/baidu-pan-tools/pan_task.py push … --auto --wait
+// CLI 主控：python -B tools/pan_task.py push <runtime-task.json> --auto --wait
 
 const BRIDGE = "http://127.0.0.1:27865";
 const POLL_MS = 2500;
@@ -63,6 +63,26 @@ async function notifyTabs(msg) {
   }
 }
 
+// 写操作必须只有一个执行者。同一任务若广播到多个网盘页签，多个页签会
+// 同时通过 pathExists 检查并提交创建请求，百度网盘随后会生成时间戳副本。
+// 因此按页签顺序尝试投递，并在首个 content script 接受任务后立即停止。
+async function notifyOneTab(msg) {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ["https://pan.baidu.com/*", "https://yun.baidu.com/*"]
+    });
+    for (const t of tabs) {
+      try {
+        const answer = await chrome.tabs.sendMessage(t.id, msg);
+        if (answer) return { delivered: 1, answer, tabId: t.id };
+      } catch (_) {}
+    }
+    return { delivered: 0, answer: null, tabId: null };
+  } catch (_) {
+    return { delivered: 0, answer: null, tabId: null };
+  }
+}
+
 /**
  * @param {{ force?: boolean }} opts force=true 时用桥上内容覆盖本地同 id 包
  */
@@ -87,7 +107,7 @@ async function pollBridge(opts = {}) {
       result.error =
         "任务桥未连接（" +
         BRIDGE +
-        "）。请先运行: python scripts/baidu-pan-tools/bridge.py";
+        "）。请先运行 Skill 中的 scripts/start_connector.ps1";
       await chrome.storage.local.set({ lastPoll: { ...result, at: Date.now() } });
       return result;
     }
@@ -188,8 +208,8 @@ async function pollBridge(opts = {}) {
 
     // 通知 content 静默执行 auto 包（connector 模式）
     for (const id of autoRunIds) {
-      const n = await notifyTabs({ type: "auto-run-pack", id });
-      if (!n) {
+      const delivery = await notifyOneTab({ type: "auto-run-pack", id });
+      if (!delivery.delivered) {
         // 无 pan 页：记 error 到 bridge，CLI wait 能看见
         await fetch(BRIDGE + "/run/result", {
           method: "POST",
@@ -296,7 +316,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await chrome.storage.local.set({ packs, activePackId: pack.id });
         await notifyTabs({ type: "packs-updated" });
         if (pack.auto) {
-          await notifyTabs({ type: "auto-run-pack", id: pack.id });
+          await notifyOneTab({ type: "auto-run-pack", id: pack.id });
         }
         sendResponse({ ok: true, id: pack.id });
       } catch (e) {

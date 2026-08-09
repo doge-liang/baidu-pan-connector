@@ -7,8 +7,14 @@
     packs: {},
     activePackId: null,
     running: false,
-    collapsed: false,
+    collapsed: true,
     log: [],
+    connection: "connecting",
+    connectionMessage: "正在连接本机 bridge",
+    currentTaskId: null,
+    contextInvalidated: false,
+    connectorTimer: null,
+    panRpcTimer: null,
     // 自身 persist 触发的 storage 变更；执行中或自写回写时禁止 loadState 冲掉内存状态
     ignoreStorageReload: false,
     crawlTimer: null,
@@ -268,8 +274,8 @@
   }
 
   async function panUploadPart(remotePath, uploadid, partseq, buf) {
-    // 网页端分片上传到 PCS；凭据随 pan 登录 Cookie
-    const q =
+    // 保留当前已投入使用的网页端 PCS 分片上传路径；凭据随 pan 登录 Cookie。
+    const query =
       "method=upload&type=tmpfile&app_id=250528&channel=00000000000000000000000000000000" +
       "&clienttype=0&web=1&uploadsign=0" +
       "&path=" +
@@ -284,37 +290,40 @@
       "https://c2.pcs.baidu.com/rest/2.0/pcs/superfile2?",
       "https://njc-upload.pcs.baidu.com/rest/2.0/pcs/superfile2?"
     ];
-    let lastErr = null;
-    for (const h of hosts) {
+    let lastError = null;
+    for (const host of hosts) {
       try {
-        const r = await fetch(h + q, {
+        const response = await fetch(host + query, {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/octet-stream" },
           body: buf
         });
-        const text = await r.text();
-        let j = null;
+        const text = await response.text();
+        let result = null;
         try {
-          j = JSON.parse(text);
+          result = JSON.parse(text);
         } catch (_) {
-          j = { raw: text.slice(0, 200), status: r.status };
+          result = { raw: text.slice(0, 200), status: response.status };
         }
-        // 成功时常有 md5 字段或 error_code===0
-        if (r.ok && j && (j.md5 || j.error_code === 0 || j.errno === 0 || !j.error_code)) {
-          if (j.error_code && j.error_code !== 0 && j.error_code !== "0") {
-            lastErr = j;
+        if (
+          response.ok &&
+          result &&
+          (result.md5 || result.error_code === 0 || result.errno === 0 || !result.error_code)
+        ) {
+          if (result.error_code && result.error_code !== 0 && result.error_code !== "0") {
+            lastError = result;
             continue;
           }
-          return j;
+          return result;
         }
-        lastErr = j || { status: r.status };
-      } catch (e) {
-        lastErr = e;
+        lastError = result || { status: response.status };
+      } catch (error) {
+        lastError = error;
       }
     }
     throw new Error(
-      "分片上传失败 partseq=" + partseq + " " + JSON.stringify(lastErr).slice(0, 300)
+      "分片上传失败 partseq=" + partseq + " " + JSON.stringify(lastError).slice(0, 300)
     );
   }
 
@@ -829,75 +838,53 @@
     }
   }
 
-  function saveScroll() {
-    const el = document.getElementById("bpt-scroll");
-    return el ? el.scrollTop : 0;
+  function isContextInvalidatedError(error) {
+    return /Extension context invalidated/i.test(String(error && (error.message || error)));
   }
 
-  function restoreScroll(top) {
-    const el = document.getElementById("bpt-scroll");
-    if (el) el.scrollTop = top;
-  }
-
-  /** 只改一张任务卡，避免全量 render 导致列表滚回顶部 */
-  function patchTaskCard(taskId) {
-    const pack = activePack();
-    if (!pack) return false;
-    const t = pack.tasks.find((x) => x.id === taskId);
-    if (!t) return false;
-    const el = document.querySelector('.bpt-task[data-id="' + cssEscape(taskId) + '"]');
-    if (!el) return false;
-    const st = t.status || "pending";
-    const risk = t.risk === "high" ? " risk-high" : "";
-    el.className = "bpt-task " + st + risk;
-    const statusEl = el.querySelector(".bpt-status");
-    if (statusEl) {
-      statusEl.textContent =
-        "状态：" +
-        st +
-        (t.result && t.result.error ? " · " + t.result.error : "") +
-        (t.result && t.result.skipped ? " · 已跳过" : "");
+  function readRuntimeError() {
+    try {
+      const error = chrome.runtime.lastError;
+      return error ? { message: error.message || String(error) } : null;
+    } catch (error) {
+      return { message: String(error && (error.message || error)) };
     }
-    el.querySelectorAll("button[data-act]").forEach((btn) => {
-      const act = btn.getAttribute("data-act");
-      if (act === "approve" || act === "reject") {
-        btn.disabled = st === "done" || state.running;
+  }
+
+  function stopForInvalidatedContext(error) {
+    if (state.contextInvalidated) return;
+    state.contextInvalidated = true;
+    if (state.connectorTimer) clearInterval(state.connectorTimer);
+    if (state.panRpcTimer) clearInterval(state.panRpcTimer);
+    if (state.crawlTimer) clearInterval(state.crawlTimer);
+    state.connectorTimer = null;
+    state.panRpcTimer = null;
+    state.crawlTimer = null;
+    state.connection = "error";
+    state.connectionMessage = "扩展已重载，请刷新百度网盘页面";
+    log(state.connectionMessage);
+    if (error && !isContextInvalidatedError(error)) log(String(error.message || error));
+    render();
+  }
+
+  function safeRuntimeSendMessage(message, callback) {
+    if (state.contextInvalidated) {
+      callback(undefined, { message: state.connectionMessage });
+      return;
+    }
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) {
+        throw new Error("Extension context invalidated.");
       }
-      if (act === "reset") btn.disabled = !!state.running;
-    });
-    patchMetaCounts(pack);
-    return true;
-  }
-
-  function patchMetaCounts(pack) {
-    const meta = document.getElementById("bpt-meta-counts");
-    if (!meta || !pack) return;
-    const counts = pack.tasks.reduce((a, t) => {
-      a[t.status] = (a[t.status] || 0) + 1;
-      return a;
-    }, {});
-    meta.textContent =
-      "pending " +
-      (counts.pending || 0) +
-      " / approved " +
-      (counts.approved || 0) +
-      " / done " +
-      (counts.done || 0) +
-      " / failed " +
-      (counts.failed || 0);
-  }
-
-  function cssEscape(s) {
-    if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(s);
-    return String(s).replace(/"/g, '\\"');
-  }
-
-  function fmtSize(n) {
-    if (n == null) return "";
-    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
-    if (n >= 1048576) return (n / 1048576).toFixed(2) + " MB";
-    if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
-    return n + " B";
+      chrome.runtime.sendMessage(message, (response) => {
+        const runtimeError = readRuntimeError();
+        if (isContextInvalidatedError(runtimeError)) stopForInvalidatedContext(runtimeError);
+        callback(response, runtimeError);
+      });
+    } catch (error) {
+      if (isContextInvalidatedError(error)) stopForInvalidatedContext(error);
+      callback(undefined, { message: String(error && (error.message || error)) });
+    }
   }
 
   function activePack() {
@@ -911,6 +898,12 @@
         packs: state.packs,
         activePackId: state.activePackId
       });
+    } catch (error) {
+      if (isContextInvalidatedError(error)) {
+        stopForInvalidatedContext(error);
+        return;
+      }
+      throw error;
     } finally {
       // 执行中保持屏蔽，避免 50ms 后 onChanged 用旧快照冲掉 done
       if (!state.running) {
@@ -922,9 +915,17 @@
   }
 
   async function loadState() {
-    const data = await chrome.storage.local.get(["packs", "activePackId"]);
-    state.packs = data.packs || {};
-    state.activePackId = data.activePackId || Object.keys(state.packs)[0] || null;
+    try {
+      const data = await chrome.storage.local.get(["packs", "activePackId"]);
+      state.packs = data.packs || {};
+      state.activePackId = data.activePackId || Object.keys(state.packs)[0] || null;
+    } catch (error) {
+      if (isContextInvalidatedError(error)) {
+        stopForInvalidatedContext(error);
+        return;
+      }
+      throw error;
+    }
   }
 
   function setTaskStatus(taskId, status, result) {
@@ -935,55 +936,7 @@
     t.status = status;
     if (result !== undefined) t.result = result;
     persist();
-    // 优先就地更新，不重绘整页、不重置滚动
-    if (!patchTaskCard(taskId)) {
-      const top = saveScroll();
-      render();
-      restoreScroll(top);
-    }
-  }
-
-  function approveAll() {
-    const pack = activePack();
-    if (!pack) return;
-    for (const t of pack.tasks) {
-      if (t.status === "pending" || t.status === "rejected") t.status = "approved";
-    }
-    persist();
-    const top = saveScroll();
-    // 批量核准：逐卡 patch，避免 scroll 跳动
-    let ok = true;
-    for (const t of pack.tasks) {
-      if (!patchTaskCard(t.id)) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok) {
-      render();
-      restoreScroll(top);
-    }
-  }
-
-  function rejectAll() {
-    const pack = activePack();
-    if (!pack) return;
-    for (const t of pack.tasks) {
-      if (t.status === "pending" || t.status === "approved") t.status = "rejected";
-    }
-    persist();
-    const top = saveScroll();
-    let ok = true;
-    for (const t of pack.tasks) {
-      if (!patchTaskCard(t.id)) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok) {
-      render();
-      restoreScroll(top);
-    }
+    render();
   }
 
   function countPackStatuses(pack) {
@@ -1060,19 +1013,9 @@
       return { ok: true, skipped: true, reason: "no approved tasks" };
     }
     const high = queue.filter((t) => t.risk === "high" || t.op === "delete");
-    if (high.length && !auto) {
-      const names = high.map((t) => t.title || t.path).join("\n");
-      const ok = confirm(
-        "即将执行 " +
-          high.length +
-          " 个高风险/删除任务（进回收站，可恢复）：\n\n" +
-          names +
-          "\n\n确认继续？"
-      );
-      if (!ok) {
-        log("用户取消执行");
-        return { ok: false, error: "user cancelled" };
-      }
+    if (!auto) {
+      log("已拒绝网页端手动执行；请由 Agent/CLI 下发授权任务");
+      return { ok: false, error: "manual execution disabled; use Agent/CLI auto authorization" };
     }
     if (auto && high.length) {
       log("connector 自动执行含 " + high.length + " 个删除/高风险任务（CLI --auto 已授权）");
@@ -1080,9 +1023,7 @@
     state.running = true;
     state.ignoreStorageReload = true;
     if (auto) state.autoRunningId = pack.id;
-    const top = saveScroll();
     render();
-    restoreScroll(top);
     log(
       (auto ? "[auto] " : "") + "开始执行 " + queue.length + " 个已核准任务 · " + pack.id
     );
@@ -1097,6 +1038,7 @@
       state.running = false;
       state.ignoreStorageReload = false;
       state.autoRunningId = null;
+      state.currentTaskId = null;
       await reportRunToBridge(pack, "failed", { error: String(e.message || e) });
       render();
       return { ok: false, error: String(e.message || e) };
@@ -1119,6 +1061,8 @@
           continue;
         }
       }
+      state.currentTaskId = t.id;
+      render();
       log("执行 " + t.op + " · " + (t.title || t.id));
       try {
         const r = await runTask(t);
@@ -1156,6 +1100,7 @@
     state.running = false;
     state.ignoreStorageReload = false;
     state.autoRunningId = null;
+    state.currentTaskId = null;
     const finalPack = state.packs[pack.id] || pack;
     const counts = countPackStatuses(finalPack);
     let finalStatus = "done";
@@ -1172,9 +1117,7 @@
         counts.failed
     );
     await reportRunToBridge(finalPack, finalStatus);
-    const top2 = saveScroll();
     render();
-    restoreScroll(top2);
     return { ok: counts.failed === 0, status: finalStatus, counts };
   }
 
@@ -1219,238 +1162,128 @@
     return executeApproved({ auto: true, packId, skipConfirm: true });
   }
 
+  function getConnectorView() {
+    const pack = activePack();
+    const tasks = (pack && pack.tasks) || [];
+    const counts = countPackStatuses(pack);
+    const currentTask = tasks.find((task) => task.id === state.currentTaskId) || null;
+    const failedTask = tasks.find((task) => task.status === "failed") || null;
+    const waiting = counts.pending + counts.approved + counts.rejected + counts.other;
+    const processed = counts.done + counts.failed + counts.rejected;
+
+    let color = "green";
+    let label = "已连接";
+    let title = pack ? pack.title || pack.id : "等待 Agent 下发任务";
+    let summary = state.connectionMessage || "Connector 已就绪";
+
+    if (state.connection === "error") {
+      color = "red";
+      label = "连接异常";
+      summary = state.connectionMessage || "无法连接本机 bridge";
+    } else if (state.running) {
+      color = "blue";
+      label = "执行中";
+      title = currentTask ? currentTask.title || currentTask.id : title;
+      summary = tasks.length ? `进度 ${Math.min(processed + 1, tasks.length)}/${tasks.length}` : "正在执行 Agent 任务";
+    } else if (state.crawlBusy) {
+      color = "blue";
+      label = "同步中";
+      title = "正在读取网盘索引";
+      summary = "全盘抓取由 Agent 管理";
+    } else if (state.indexBusy) {
+      color = "blue";
+      label = "同步中";
+      title = "正在重建本地索引";
+      summary = "索引任务由 Agent 管理";
+    } else if (counts.failed > 0) {
+      color = "red";
+      label = "任务失败";
+      title = failedTask ? failedTask.title || failedTask.id : title;
+      summary = `完成 ${counts.done} · 失败 ${counts.failed}`;
+    } else if (waiting > 0) {
+      color = "blue";
+      label = "等待 Agent";
+      summary = `待处理 ${waiting} · 已完成 ${counts.done}`;
+    } else if (pack && tasks.length) {
+      color = "green";
+      label = "已完成";
+      summary = `已完成 ${counts.done}/${tasks.length}`;
+    } else if (state.connection === "connecting") {
+      color = "blue";
+      label = "连接中";
+    }
+
+    return {
+      color,
+      label,
+      title,
+      summary,
+      packId: pack && pack.id,
+      currentTaskId: state.currentTaskId,
+      counts,
+      running: state.running,
+      log: state.log.slice(-200)
+    };
+  }
+
   function render() {
     const root = document.getElementById("bpt-root");
     if (!root) return;
-    const prevScroll = saveScroll();
+    const view = getConnectorView();
+    root.classList.toggle("bpt-collapsed", state.collapsed);
+    root.dataset.state = view.color;
+
     if (state.collapsed) {
-      root.classList.add("bpt-collapsed");
-      root.innerHTML =
-        '<div class="bpt-header"><h1>网盘任务</h1><button type="button" id="bpt-expand">展开</button></div>';
+      root.innerHTML = `
+        <div class="bpt-header bpt-header-compact">
+          <span class="bpt-light bpt-light-${view.color}" aria-hidden="true"></span>
+          <div class="bpt-compact-copy" aria-live="polite">
+            <div class="bpt-current-title">${escapeHtml(view.title)}</div>
+            <div class="bpt-current-summary">${escapeHtml(view.label + " · " + view.summary)}</div>
+          </div>
+          <button type="button" class="bpt-toggle" id="bpt-expand" aria-label="展开 Connector 状态">
+            <svg class="bpt-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m6 9 6 6 6-6"></path>
+            </svg>
+          </button>
+        </div>`;
       root.querySelector("#bpt-expand").onclick = () => {
         state.collapsed = false;
         render();
       };
       return;
     }
-    root.classList.remove("bpt-collapsed");
-    const packIds = Object.keys(state.packs);
-    const pack = activePack();
 
-    let body = "";
-    // 空状态也保留拉取 / 导入 / 清空，避免「拉不到又清不掉」
-    body += `<div class="bpt-toolbar">
-        <button type="button" id="bpt-poll">拉取桥接</button>
-        <button type="button" id="bpt-force">强制重载</button>
-        <button type="button" id="bpt-import">导入 JSON</button>
-        <button type="button" id="bpt-clear-pack" ${!pack || state.running ? "disabled" : ""}>清空当前包</button>
-        <button type="button" class="danger" id="bpt-clear-all" ${!packIds.length || state.running ? "disabled" : ""}>清空全部</button>
-      </div>`;
-    body += `<div class="bpt-index-box">
-        <div class="bpt-index-title">刷新本地索引（步 7）</div>
-        <div class="bpt-index-desc">全盘 /api/list 抓取 → 下载 JSON 或推到本机 bridge → baidu-pan-index.py 写入 5-External/baidu-pan</div>
-        <div class="bpt-toolbar">
-          <button type="button" class="primary" id="bpt-crawl-start" ${state.crawlBusy || state.running ? "disabled" : ""}>开始抓取</button>
-          <button type="button" id="bpt-crawl-stop" ${!state.crawlBusy ? "disabled" : ""}>中止抓取</button>
-          <button type="button" id="bpt-crawl-status">抓取状态</button>
-          <button type="button" id="bpt-crawl-dl" ${state.crawlBusy ? "disabled" : ""}>下载 crawl JSON</button>
-          <button type="button" id="bpt-index-push" ${state.crawlBusy || state.indexBusy ? "disabled" : ""}>上传并重建索引</button>
-          <button type="button" id="bpt-index-status">索引状态</button>
-        </div>
-        <div class="bpt-index-hint" id="bpt-index-hint">bridge 须运行：python scripts/baidu-pan-tools/bridge.py</div>
-      </div>`;
-
-    if (!pack) {
-      body += `<div class="bpt-empty">
-        暂无任务包。<br>
-        1）启动任务桥后由 agent 投递；或<br>
-        2）点「导入 JSON」粘贴任务包；或<br>
-        3）点「强制重载」从桥恢复（普通拉取不会带回已清空的包）。
-      </div>`;
-    } else {
-      const counts = pack.tasks.reduce((a, t) => {
-        a[t.status] = (a[t.status] || 0) + 1;
-        return a;
-      }, {});
-      body += `<div class="bpt-meta"><b>${escapeHtml(pack.title)}</b>
-${escapeHtml(pack.description || "")}
-快照 ${escapeHtml(pack.snapshot || "—")} · 任务 ${pack.tasks.length}
-<span id="bpt-meta-counts">pending ${counts.pending || 0} / approved ${counts.approved || 0} / done ${counts.done || 0} / failed ${counts.failed || 0}</span></div>`;
-      body += `<div class="bpt-toolbar">
-        <button type="button" id="bpt-approve-all">全部核准</button>
-        <button type="button" id="bpt-reject-all">全部驳回</button>
-        <button type="button" class="primary" id="bpt-run" ${state.running ? "disabled" : ""}>执行已核准</button>
-      </div>`;
-      for (const t of pack.tasks) {
-        const risk = t.risk === "high" ? " risk-high" : "";
-        const st = t.status || "pending";
-        body += `<div class="bpt-task ${st}${risk}" data-id="${escapeAttr(t.id)}">
-          <div class="bpt-task-title">
-            <span class="bpt-task-op op-${escapeAttr(t.op)}">${escapeHtml(t.op)}</span>
-            ${escapeHtml(t.title || t.id)}
-          </div>
-          <div class="bpt-task-path">${
-          t.op === "copy-batch"
-            ? "批量 " +
-              ((t.items && t.items.length) || 0) +
-              " 个文件" +
-              (t.items
-                ? " · 合计 " +
-                  fmtSize(t.items.reduce((a, it) => a + (Number(it.size) || 0), 0))
-                : "")
-            : t.op === "normalize-dir"
-              ? "实况列举并规范化 · rule=" + escapeHtml(t.rule || "") + (t.dry_run ? " · dry-run" : "")
-              : t.op === "upload" || t.op === "upload_file"
-                ? "本地 " +
-                  escapeHtml(t.local || t.path_local || t.file_token || "") +
-                  (t.dest || t.path
-                    ? "<br>→ " +
-                      escapeHtml(
-                        t.path || (t.dest || "") + "/" + (t.newname || "")
-                      )
-                    : "")
-                : escapeHtml(t.path || "")
-        }${
-          t.op === "rename" && t.newname
-            ? "<br>→ " + escapeHtml(t.newname)
-            : (t.op === "move" || t.op === "copy") && t.dest
-              ? "<br>→ " + escapeHtml(t.dest + "/" + (t.newname || ""))
-              : t.op !== "copy-batch" &&
-                  t.op !== "normalize-dir" &&
-                  t.op !== "upload" &&
-                  t.op !== "upload_file" &&
-                  t.dest
-                ? "<br>→ " + escapeHtml(t.dest + "/" + (t.newname || ""))
-                : ""
-        }${t.size != null ? "<br>size " + fmtSize(t.size) : ""}${
-          t.size_hint_gb != null ? "<br>约 " + t.size_hint_gb + " GB" : ""
-        }${t.isdir ? "<br>（整夹）" : ""}</div>
-          <div class="bpt-task-reason">${escapeHtml(t.reason || "")}</div>
-          <div class="bpt-task-actions">
-            <button type="button" data-act="approve" ${st === "done" || state.running ? "disabled" : ""}>核准</button>
-            <button type="button" data-act="reject" ${st === "done" || state.running ? "disabled" : ""}>驳回</button>
-            <button type="button" data-act="reset" ${state.running ? "disabled" : ""}>重置</button>
-          </div>
-          <div class="bpt-status">状态：${escapeHtml(st)}${
-          t.result && t.result.error ? " · " + escapeHtml(t.result.error) : ""
-        }${t.result && t.result.skipped ? " · 已跳过" : ""}</div>
-        </div>`;
-      }
-    }
-
-    // 布局：标题 → 日志（顶端固定）→ 可滚动任务区（滚动条只在此区）
     root.innerHTML = `
       <div class="bpt-header">
-        <h1>网盘任务核对</h1>
-        <button type="button" id="bpt-collapse">收起</button>
+        <div class="bpt-brand">
+          <span class="bpt-light bpt-light-${view.color}" aria-hidden="true"></span>
+          <span>Connector</span>
+        </div>
+        <span class="bpt-state-label">${escapeHtml(view.label)}</span>
+        <button type="button" class="bpt-toggle" id="bpt-collapse" aria-label="收起 Connector 状态">
+          <svg class="bpt-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="m18 15-6-6-6 6"></path>
+          </svg>
+        </button>
       </div>
-      <div class="bpt-log" id="bpt-log">${escapeHtml(state.log.join("\n"))}</div>
-      <div class="bpt-scroll" id="bpt-scroll">
-        <select class="bpt-select" id="bpt-pack-select">
-          ${
-            packIds.length
-              ? packIds
-                  .map(
-                    (id) =>
-                      `<option value="${escapeAttr(id)}" ${
-                        id === state.activePackId ? "selected" : ""
-                      }>${escapeHtml(state.packs[id].title || id)}</option>`
-                  )
-                  .join("")
-              : '<option value="">（无任务包）</option>'
-          }
-        </select>
-        ${body}
+      <div class="bpt-status-card" aria-live="polite">
+        <div class="bpt-status-eyebrow">当前任务</div>
+        <div class="bpt-current-title">${escapeHtml(view.title)}</div>
+        <div class="bpt-current-summary">${escapeHtml(view.summary)}</div>
+        <div class="bpt-agent-note">任务控制与审批由 Agent 侧统一处理</div>
+      </div>
+      <div class="bpt-debug">
+        <div class="bpt-debug-title"><span>DEBUG</span><span>${view.log.length} lines</span></div>
+        <pre class="bpt-log" id="bpt-log">${escapeHtml(view.log.join("\n") || "等待 Connector 日志…")}</pre>
       </div>`;
 
-    // 日志默认贴底看最新；任务列表恢复原滚动位置
     const logEl = document.getElementById("bpt-log");
     if (logEl) logEl.scrollTop = logEl.scrollHeight;
-    restoreScroll(prevScroll);
-
     root.querySelector("#bpt-collapse").onclick = () => {
       state.collapsed = true;
       render();
     };
-    const sel = root.querySelector("#bpt-pack-select");
-    if (sel) {
-      sel.onchange = () => {
-        state.activePackId = sel.value;
-        persist();
-        const top = saveScroll();
-        render();
-        restoreScroll(top);
-      };
-    }
-    const bind = (id, fn) => {
-      const el = root.querySelector("#" + id);
-      if (el) el.onclick = fn;
-    };
-    bind("bpt-approve-all", approveAll);
-    bind("bpt-reject-all", rejectAll);
-    bind("bpt-run", () => executeApproved({ auto: false }));
-    bind("bpt-poll", () => doPoll(false));
-    bind("bpt-force", () => doPoll(true));
-    bind("bpt-import", importJson);
-    bind("bpt-clear-pack", clearCurrentPack);
-    bind("bpt-clear-all", clearAllPacks);
-    bind("bpt-crawl-start", startCrawl);
-    bind("bpt-crawl-stop", stopCrawl);
-    bind("bpt-crawl-status", () => logCrawlStatus(true));
-    bind("bpt-crawl-dl", downloadCrawl);
-    bind("bpt-index-push", uploadAndRebuildIndex);
-    bind("bpt-index-status", pollIndexStatus);
-    root.querySelectorAll(".bpt-task").forEach((el) => {
-      const id = el.getAttribute("data-id");
-      el.querySelectorAll("button[data-act]").forEach((btn) => {
-        btn.onclick = () => {
-          const act = btn.getAttribute("data-act");
-          if (act === "approve") setTaskStatus(id, "approved");
-          if (act === "reject") setTaskStatus(id, "rejected");
-          if (act === "reset") setTaskStatus(id, "pending", null);
-        };
-      });
-    });
-  }
-
-  function clearCurrentPack() {
-    const pack = activePack();
-    if (!pack) return;
-    if (state.running) {
-      log("执行中，不能清空");
-      return;
-    }
-    if (!confirm("清空当前任务包「" + pack.title + "」？\n仅清除本地列表，不会删除网盘文件。")) return;
-    chrome.runtime.sendMessage({ type: "clear-pack", id: pack.id }, (resp) => {
-      if (chrome.runtime.lastError) {
-        log("清空失败: " + chrome.runtime.lastError.message);
-        return;
-      }
-      if (resp && resp.ok) {
-        log("已清空任务包 " + pack.id);
-        loadState().then(render);
-      } else log("清空失败");
-    });
-  }
-
-  function clearAllPacks() {
-    if (state.running) {
-      log("执行中，不能清空");
-      return;
-    }
-    const n = Object.keys(state.packs).length;
-    if (!n) return;
-    if (!confirm("清空全部 " + n + " 个任务包？\n仅清除本地列表，不会删除网盘文件。")) return;
-    chrome.runtime.sendMessage({ type: "clear-all-packs" }, (resp) => {
-      if (chrome.runtime.lastError) {
-        log("清空失败: " + chrome.runtime.lastError.message);
-        return;
-      }
-      if (resp && resp.ok) {
-        log("已清空全部任务包（" + (resp.cleared || 0) + "）");
-        loadState().then(render);
-      } else log("清空失败");
-    });
   }
 
   function logCrawlStatus(forceLog) {
@@ -1478,8 +1311,6 @@ ${escapeHtml(pack.description || "")}
       (s.finished ? " [完成]" : "") +
       (s.aborted ? " [已中止]" : "");
     if (forceLog || s.running) log(line);
-    const hint = document.getElementById("bpt-index-hint");
-    if (hint) hint.textContent = line;
     if (s.md5Missing > 0 && s.running && s.files > 100 && s.md5Missing / s.files > 0.05) {
       log("警告：md5Missing 偏高，去重判据可能退化，建议中止排查");
     }
@@ -1489,7 +1320,7 @@ ${escapeHtml(pack.description || "")}
   /**
    * @param {{ silent?: boolean, autoIndex?: boolean, concurrency?: number }} [opts]
    * silent=true：跳过 confirm（供 bridge pan-rpc 远程启动）
-   * autoIndex=true：抓取成功后自动上传并重建索引
+   * autoIndex=true：抓取成功后由 Agent 流程自动同步索引
    * @returns {{ ok: boolean, error?: string, started?: boolean }}
    */
   function startCrawl(opts) {
@@ -1506,21 +1337,17 @@ ${escapeHtml(pack.description || "")}
       return { ok: false, error: "crawl already running" };
     }
     if (!opts.silent) {
-      if (!confirm("开始全盘抓取？约 15 分钟量级，请保持本页打开且已登录。")) {
-        return { ok: false, error: "user cancelled" };
-      }
+      return { ok: false, error: "manual crawl disabled; use Agent RPC" };
     }
     const concurrency = Number(opts.concurrency) || 10;
     const autoIndex = !!opts.autoIndex;
     state.crawlBusy = true;
-    const top = saveScroll();
     render();
-    restoreScroll(top);
     log(
       "全盘抓取开始（并发 " +
         concurrency +
         (opts.silent ? "，远程触发" : "") +
-        (autoIndex ? "，完成后自动重建索引" : "") +
+        (autoIndex ? "，完成后自动同步索引" : "") +
         "）…"
     );
     if (state.crawlTimer) clearInterval(state.crawlTimer);
@@ -1535,14 +1362,12 @@ ${escapeHtml(pack.description || "")}
         logCrawlStatus(true);
         if (s.aborted) log("抓取已中止");
         else if (s.md5Missing) log("抓取完成，但 md5Missing=" + s.md5Missing + "，请谨慎用于去重");
-        else log("抓取完成。可「下载 crawl JSON」或「上传并重建索引」");
+        else log("抓取完成，结果等待 Agent 侧后续处理");
         if (autoIndex && s.finished && !s.aborted) {
-          log("远程任务：自动上传并重建索引…");
+          log("Agent 任务：自动同步本地索引…");
           await uploadAndRebuildIndex({ silent: true });
         }
-        const t = saveScroll();
         render();
-        restoreScroll(t);
       })
       .catch((e) => {
         if (state.crawlTimer) {
@@ -1551,9 +1376,7 @@ ${escapeHtml(pack.description || "")}
         }
         state.crawlBusy = false;
         log("抓取失败: " + (e.message || e));
-        const t = saveScroll();
         render();
-        restoreScroll(t);
       });
     return { ok: true, started: true };
   }
@@ -1561,21 +1384,7 @@ ${escapeHtml(pack.description || "")}
   function stopCrawl() {
     if (!window.BptCrawl) return;
     window.BptCrawl.abort();
-    log("已请求中止抓取（当前目录列举结束后停止）");
-  }
-
-  function downloadCrawl() {
-    if (!window.BptCrawl) {
-      log("抓取模块未加载");
-      return;
-    }
-    const s = window.BptCrawl.status();
-    if (!s.entries) {
-      log("尚无抓取数据");
-      return;
-    }
-    const r = window.BptCrawl.downloadJson();
-    log("已触发下载 baidu-pan-crawl.json（total=" + r.total + " md5_missing=" + r.md5_missing + "）");
+    log("Agent 已请求停止抓取；当前目录列举结束后终止");
   }
 
   /**
@@ -1602,21 +1411,13 @@ ${escapeHtml(pack.description || "")}
       return { ok: false, error: "no entries" };
     }
     if (!opts.silent) {
-      if (s.md5Missing) {
-        if (!confirm("md5Missing=" + s.md5Missing + "，仍要重建索引吗？")) {
-          return { ok: false, error: "user cancelled" };
-        }
-      } else if (
-        !confirm(
-          "上传 crawl 到本机 bridge 并运行 baidu-pan-index.py？\n将覆盖 5-External/baidu-pan 下 catalog/_data。"
-        )
-      ) {
-        return { ok: false, error: "user cancelled" };
-      }
-    } else if (s.md5Missing) {
+      return { ok: false, error: "manual index rebuild disabled; use Agent RPC" };
+    }
+    if (s.md5Missing) {
       log("警告：md5Missing=" + s.md5Missing + "，远程静默模式仍继续重建");
     }
     state.indexBusy = true;
+    render();
     try {
       log("构建 payload… entries=" + s.entries);
       const payload = window.BptCrawl.buildPayload();
@@ -1683,19 +1484,17 @@ ${escapeHtml(pack.description || "")}
         error: last && last.ok ? undefined : (last && (last.error || last.stderr_tail)) || "rebuild status unknown"
       };
     } catch (e) {
-      log("上传/重建异常: " + (e.message || e) + "（确认 bridge 在跑：python scripts/baidu-pan-tools/bridge.py）");
+      log("上传/重建异常: " + (e.message || e) + "（确认 bridge 已通过 scripts/start_connector.ps1 启动）");
       return { ok: false, error: String(e.message || e) };
     } finally {
       state.indexBusy = false;
-      const t = saveScroll();
       render();
-      restoreScroll(t);
     }
   }
 
   function bridgeFetch(path, method, body) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(
+      safeRuntimeSendMessage(
         {
           type: "bridge-fetch",
           path,
@@ -1703,9 +1502,9 @@ ${escapeHtml(pack.description || "")}
           headers: { "Content-Type": "application/json" },
           body: body != null ? body : undefined
         },
-        (resp) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message });
+        (resp, runtimeError) => {
+          if (runtimeError) {
+            resolve({ ok: false, error: runtimeError.message });
             return;
           }
           resolve(resp || { ok: false, error: "no response" });
@@ -1714,79 +1513,44 @@ ${escapeHtml(pack.description || "")}
     });
   }
 
-  function pollIndexStatus() {
-    bridgeFetch("/index/status", "GET").then((resp) => {
-      if (!resp.ok && resp.error) {
-        log("无法连接 bridge: " + resp.error);
-        return;
-      }
-      const st = resp.json || {};
-      log(
-        "索引状态 running=" +
-          st.running +
-          " crawl_cached=" +
-          st.crawl_cached +
-          " bytes=" +
-          (st.crawl_bytes || 0) +
-          " last_ok=" +
-          ((st.last && st.last.ok) || false)
-      );
-      if (st.last && st.last.stats) {
-        log(
-          "上次 stats files=" +
-            st.last.stats.files +
-            " dirs=" +
-            st.last.stats.dirs +
-            " snapshot=" +
-            (st.last.stats.snapshot || "")
-        );
-      }
-      if (st.last && st.last.error) log("上次错误: " + st.last.error);
-    });
-  }
-
-  function doPoll(force) {
-    log(force ? "强制重载任务桥…" : "拉取任务桥…");
-    chrome.runtime.sendMessage({ type: "poll-now", force: !!force }, (resp) => {
-      const err = chrome.runtime.lastError;
-      if (err) {
-        log("扩展通信失败: " + err.message + "（请到 chrome://extensions 点「重新加载」扩展）");
-        return;
-      }
-      if (!resp) {
-        log("无响应。请确认扩展已启用，并重新加载扩展后再试。");
-        return;
-      }
-      if (resp.error) log("桥: " + resp.error);
-      if (resp.note) log(resp.note);
-      if (resp.imported && resp.imported.length) {
-        log("已导入: " + resp.imported.join(", "));
-      } else if (resp.ok && resp.skipped && resp.skipped.length) {
-        log("本地已有: " + resp.skipped.join(", ") + "（面板仍空则刷新本页 F5）");
-      } else if (resp.ok && !resp.historyCount) {
-        log("桥在线但无任务包。");
-      }
-      loadState().then(render);
-    });
-  }
-
-  function importJson() {
-    const raw = prompt("粘贴任务包 JSON（baidu-pan-task-pack/v1）：");
-    if (!raw) return;
-    try {
-      const pack = JSON.parse(raw);
-      chrome.runtime.sendMessage({ type: "import-pack", pack }, (resp) => {
-        if (resp && resp.ok) {
-          loadState().then(() => {
-            state.activePackId = resp.id;
-            render();
-            log("已导入 " + resp.id);
-          });
-        } else log("导入失败: " + (resp && resp.error ? resp.error : ""));
-      });
-    } catch (e) {
-      log("JSON 解析失败: " + e.message);
+  function applyPollState(resp, runtimeError, verbose) {
+    if (state.contextInvalidated) {
+      render();
+      return;
     }
+    const previous = state.connection;
+    if (runtimeError || !resp || !resp.ok) {
+      state.connection = "error";
+      state.connectionMessage = runtimeError
+        ? runtimeError.message
+        : (resp && resp.error) || "本机 bridge 无响应";
+      if (verbose || previous !== "error") log("Connector 异常: " + state.connectionMessage);
+    } else {
+      state.connection = "ready";
+      state.connectionMessage = resp.pendingCount
+        ? `Bridge 在线 · ${resp.pendingCount} 个待取任务包`
+        : "Bridge 在线";
+      if (verbose || previous !== "ready") log(state.connectionMessage);
+      if (resp.note && verbose) log(resp.note);
+      if (resp.imported && resp.imported.length) log("已接收任务包: " + resp.imported.join(", "));
+    }
+    if (state.running || state.ignoreStorageReload) {
+      render();
+      return;
+    }
+    loadState().then(render);
+  }
+
+  function refreshConnector() {
+    safeRuntimeSendMessage({ type: "poll-now", force: false }, (resp, runtimeError) => {
+      applyPollState(resp, runtimeError, true);
+    });
+  }
+
+  function refreshStoredConnection() {
+    safeRuntimeSendMessage({ type: "get-last-poll" }, (resp, runtimeError) => {
+      applyPollState(resp, runtimeError, false);
+    });
   }
 
   function escapeHtml(s) {
@@ -1796,10 +1560,6 @@ ${escapeHtml(pack.description || "")}
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
-  function escapeAttr(s) {
-    return escapeHtml(s).replace(/'/g, "&#39;");
-  }
-
   function mount() {
     if (document.getElementById("bpt-root")) return;
     const root = document.createElement("div");
@@ -2077,6 +1837,10 @@ ${escapeHtml(pack.description || "")}
         .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
       return true;
     }
+    if (msg && msg.type === "connector-ui-status") {
+      sendResponse({ ok: true, result: getConnectorView() });
+      return;
+    }
     if (msg && msg.type === "pan-rpc") {
       handlePanRpc(msg.op, msg.params)
         .then((r) => sendResponse(r))
@@ -2090,18 +1854,14 @@ ${escapeHtml(pack.description || "")}
     if (!(changes.packs || changes.activePackId)) return;
     // 执行中或本面板刚写入 storage 时，禁止用磁盘快照覆盖内存（否则 done 被冲掉、requires 误判）
     if (state.running || state.ignoreStorageReload) return;
-    loadState().then(() => {
-      const top = saveScroll();
-      render();
-      restoreScroll(top);
-    });
+    loadState().then(render);
   });
 
   // 页内兜底轮询 pan-rpc：经 background bridge-fetch（content 直连 127.0.0.1 无 CORS）。
   // MV3 SW 休眠时若本页仍开着，由此通道消费队列；与 background pollPanRpc 双通道，先取先答。
   let panRpcBusy = false;
   async function pollPanRpcFromPage() {
-    if (panRpcBusy) return;
+    if (panRpcBusy || state.contextInvalidated) return;
     panRpcBusy = true;
     try {
       const pendingResp = await bridgeFetch("/pan/rpc/pending", "GET");
@@ -2136,11 +1896,14 @@ ${escapeHtml(pack.description || "")}
   loadState().then(() => {
     render();
     log("面板已就绪（connector 模式：CLI --auto 任务将自动执行）。");
-    chrome.runtime.sendMessage({ type: "poll-now" });
+    refreshConnector();
+    if (state.contextInvalidated) return;
+    state.connectorTimer = setInterval(refreshStoredConnection, 3000);
     pollPanRpcFromPage();
-    setInterval(pollPanRpcFromPage, 1500);
+    state.panRpcTimer = setInterval(pollPanRpcFromPage, 1500);
     // 启动时若本地已有 auto+approved，补跑
     setTimeout(() => {
+      if (state.contextInvalidated) return;
       for (const id of Object.keys(state.packs || {})) {
         const p = state.packs[id];
         if (

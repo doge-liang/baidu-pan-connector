@@ -1,14 +1,14 @@
 {
   "schema": "baidu-pan-task-pack/v1",
-  "id": "example-mkdir-edit-paths-first",
-  "title": "Example mkdir — edit path before push",
+  "id": "example-mkdir-do-not-run-blindly",
+  "title": "Example only — change path before push",
   "tasks": [
     {
       "id": "m1",
       "op": "mkdir",
       "path": "/apps/baidu-pan-connector-example",
       "risk": "low",
-      "title": "example mkdir"
+      "title": "example mkdir — edit path first"
     }
   ]
 }

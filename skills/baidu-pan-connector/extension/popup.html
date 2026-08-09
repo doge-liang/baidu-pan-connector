@@ -2,31 +2,50 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; width: 340px; margin: 12px; font-size: 13px; color: #222; }
-    h1 { font-size: 14px; margin: 0 0 6px; }
-    .tag { display: inline-block; font-size: 11px; color: #0b5; border: 1px solid #0b5; border-radius: 3px; padding: 0 5px; margin-bottom: 8px; }
-    p { margin: 0 0 10px; line-height: 1.45; color: #444; }
-    button { margin: 4px 4px 0 0; padding: 6px 10px; cursor: pointer; }
-    textarea { width: 100%; height: 100px; font-family: Consolas, monospace; font-size: 11px; box-sizing: border-box; }
-    .ok { color: #0a7; }
-    .err { color: #b10e1e; }
-    .muted { color: #777; font-size: 12px; }
-    code { font-size: 12px; }
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      width: 340px;
+      margin: 0;
+      color: #172033;
+      background: #fff;
+      font: 13px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    header { display: flex; align-items: center; gap: 9px; padding: 13px 14px; border-bottom: 1px solid #e8ebf0; }
+    .light { width: 10px; height: 10px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(23,32,51,.16); }
+    .green { background: #20a464; box-shadow: 0 0 0 1px rgba(20,125,75,.24), 0 0 8px rgba(32,164,100,.55); }
+    .blue { background: #2878e0; box-shadow: 0 0 0 1px rgba(28,93,178,.24), 0 0 8px rgba(40,120,224,.55); }
+    .red { background: #d64545; box-shadow: 0 0 0 1px rgba(164,42,42,.24), 0 0 8px rgba(214,69,69,.55); }
+    .brand { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    #label { margin-left: auto; color: #687083; font-size: 11px; }
+    main { padding: 14px; }
+    .eyebrow { margin-bottom: 5px; color: #8a91a0; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    #title { overflow: hidden; font-size: 15px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    #summary { margin-top: 4px; color: #687083; font-size: 11px; }
+    .agent-note { margin-top: 11px; padding-top: 9px; color: #8a91a0; border-top: 1px solid #eef0f4; font-size: 10px; }
+    .debug { color: #b9c2d0; background: #10141c; }
+    .debug-title { display: flex; justify-content: space-between; padding: 7px 12px 5px; color: #7f8ba3; font: 700 9px/1.4 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+    pre { max-height: 180px; margin: 0; overflow: auto; padding: 5px 12px 12px; font: 10px/1.45 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
   </style>
 </head>
 <body>
-  <h1>Baidu Pan Agent Connector</h1>
-  <span class="tag">Unofficial · Capability only</span>
-  <p>本扩展只提供<strong>执行能力</strong>：在已登录的 <code>pan.baidu.com</code> 上执行 Agent 下发的任务包。决策与编排由本地 Agent + Skills 完成。</p>
-  <p class="muted">需本机任务桥 <code>127.0.0.1:27865</code>（默认）。非官方产品，与百度无关联。</p>
-  <button id="poll" type="button">拉取任务桥</button>
-  <button id="open" type="button">打开网盘</button>
-  <button id="clear" type="button">清空全部任务</button>
-  <p style="margin-top:12px">手动导入任务包 JSON（兜底）：</p>
-  <textarea id="json" placeholder='{"schema":"baidu-pan-task-pack/v1", "id":"…", "tasks":[…]}'></textarea>
-  <button id="import" type="button">导入</button>
-  <p id="msg"></p>
+  <header>
+    <span id="light" class="light blue" aria-hidden="true"></span>
+    <span class="brand">Connector</span>
+    <span id="label">连接中</span>
+  </header>
+  <main aria-live="polite">
+    <div class="eyebrow">当前任务</div>
+    <div id="title">正在读取状态</div>
+    <div id="summary">等待本机 bridge 响应</div>
+    <div class="agent-note">任务控制与审批由 Agent 侧统一处理</div>
+  </main>
+  <section class="debug">
+    <div class="debug-title"><span>DEBUG</span><span id="lines">0 lines</span></div>
+    <pre id="log">等待 Connector 日志…</pre>
+  </section>
   <script src="popup.js"></script>
 </body>
 </html>

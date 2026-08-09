@@ -4,11 +4,11 @@
 依赖：bridge 已启动 + pan.baidu.com 已登录页签 + 扩展 0.3.0+。
 
 示例:
-  python scripts/baidu-pan-tools/pan_task.py push scripts/baidu-pan-ext/tasks/xxx.json --auto --wait
-  python scripts/baidu-pan-tools/pan_task.py push xxx.json --auto --mode safe --wait
-  python scripts/baidu-pan-tools/pan_task.py status <pack-id>
-  python scripts/baidu-pan-tools/pan_task.py wait <pack-id>
-  python scripts/baidu-pan-tools/pan_task.py health
+  python -B tools/pan_task.py push <runtime>/tasks/xxx.json --auto --wait
+  python -B tools/pan_task.py push xxx.json --auto --mode safe --wait
+  python -B tools/pan_task.py status <pack-id>
+  python -B tools/pan_task.py wait <pack-id>
+  python -B tools/pan_task.py health
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     except urllib.error.URLError as e:
         print(
             f"无法连接 bridge ({BRIDGE})：{e}\n"
-            "请先: python scripts/baidu-pan-tools/bridge.py",
+            "请先运行 Skill 中的 scripts/start_connector.ps1",
             file=sys.stderr,
         )
         return 1

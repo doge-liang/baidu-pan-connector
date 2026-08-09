@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy Policy — Baidu Pan Agent Connector (Unofficial)</title>
+  <style>
+    body { font-family: system-ui, "Segoe UI", sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin-top: 1.6rem; }
+    code { background: #f4f4f4; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
+    .meta { color: #555; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p class="meta"><strong>Baidu Pan Agent Connector (Unofficial)</strong><br />
+  Effective date: 2026-08-07 · Last updated: 2026-08-07</p>
+
+  <p>This extension is an <strong>unofficial capability connector</strong>. It does not provide an autonomous product experience by itself. A companion local Agent (and optional Skills) decides which operations to request; the extension executes them only in your browser session on Baidu Netdisk (pan.baidu.com).</p>
+  <p>This extension is <strong>not affiliated with, endorsed by, or sponsored by Baidu</strong>.</p>
+
+  <h2>1. Data the extension accesses</h2>
+  <p>When you use the extension on a page where you are logged into Baidu Netdisk, it may read from that page context only what is needed to call Baidu’s same-origin web APIs for file listing and file-management operations (for example directory paths, file names, sizes, and temporary page tokens such as <code>bdstoken</code>). Those tokens are used in-memory for API requests and are <strong>not intentionally persisted</strong> by the extension as account credentials.</p>
+  <p>Task packs (JSON describing mkdir / move / rename / copy / delete-style operations) may be stored in <code>chrome.storage.local</code> on your device so the UI and background worker can track progress.</p>
+
+  <h2>2. Local bridge communication</h2>
+  <p>The extension may poll a <strong>local-only</strong> HTTP service on <code>http://127.0.0.1:27865</code> or <code>http://localhost:27865</code> (the default companion task bridge run by your Agent toolchain). Communication is intended to stay on your machine. The extension does not phone home to the developer’s servers.</p>
+  <p>If no local bridge is running, the connector simply cannot receive Agent-issued tasks over that channel.</p>
+
+  <h2>3. What we do not collect</h2>
+  <ul>
+    <li>No developer-operated analytics, advertising, or telemetry backend.</li>
+    <li>No sale of user data.</li>
+    <li>No intentional transmission of Baidu cookies or account passwords to third parties by this extension.</li>
+    <li>No remote code download for execution.</li>
+  </ul>
+
+  <h2>4. How data is used</h2>
+  <p>Data is used solely to provide the extension’s single purpose: <strong>connect a local Agent to Baidu Netdisk so authorized task packs can be executed in your logged-in browser session</strong>, and to show local status in the popup/panel.</p>
+  <p>Deleting tasks in the UI clears local pack state. Baidu Netdisk “delete” operations (if requested by a task pack) follow Baidu’s own recycle-bin behavior; they are not performed by the developer remotely.</p>
+
+  <h2>5. Third parties</h2>
+  <p>Network requests go to:</p>
+  <ul>
+    <li><code>https://pan.baidu.com/*</code> — Baidu Netdisk, under your existing login and Baidu’s terms;</li>
+    <li><code>http://127.0.0.1:27865/*</code> and <code>http://localhost:27865/*</code> — your local Agent bridge only.</li>
+  </ul>
+  <p>Baidu’s handling of account and file data is governed by Baidu’s own privacy policy and terms of service. This document only covers the extension’s behavior.</p>
+
+  <h2>6. Permissions (plain language)</h2>
+  <ul>
+    <li><strong>storage</strong> — save task packs and UI state on device.</li>
+    <li><strong>activeTab</strong> — interact with the tab you open for Netdisk / popup actions.</li>
+    <li><strong>Host: pan.baidu.com</strong> — run the content script and call same-origin Netdisk APIs while you are logged in.</li>
+    <li><strong>Host: 127.0.0.1 / localhost:27865</strong> — receive task packs and report results from/to the local Agent bridge.</li>
+  </ul>
+
+  <h2>7. Children</h2>
+  <p>This tool is intended for adult power users and developers integrating Agents. It is not directed at children.</p>
+
+  <h2>8. Changes</h2>
+  <p>Material changes to this policy will be reflected by updating the “Last updated” date on this page and, where required, the Chrome Web Store listing.</p>
+
+  <h2>9. Contact</h2>
+  <p>For privacy questions about this extension, contact the publisher email listed on the Chrome Web Store item page for <em>Baidu Pan Agent Connector (Unofficial)</em>.</p>
+</body>
+</html>
