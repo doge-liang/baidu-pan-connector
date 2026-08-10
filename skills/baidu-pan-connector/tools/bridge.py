@@ -358,6 +358,65 @@ def enqueue_rpc(op: str, params: dict[str, Any]) -> str:
     return rid
 
 
+def claim_pending_rpcs() -> list[dict[str, Any]]:
+    """Atomically hand each pending RPC to at most one extension poller.
+
+    Both the MV3 service worker and every open Pan content script poll the
+    bridge. Merely listing pending requests lets multiple pollers execute the
+    same mutation before any of them reports a result. Claiming under the
+    bridge lock gives uploads and other mutations at-most-once dispatch.
+    """
+    import time
+
+    with _lock:
+        _purge_rpc_unlocked()
+        now = time.time()
+        claimed: list[dict[str, Any]] = []
+        for r in _rpc.values():
+            if r["status"] != "pending":
+                continue
+            r["status"] = "dispatching"
+            r["dispatched"] = now
+            claimed.append(
+                {
+                    "id": r["id"],
+                    "op": r["op"],
+                    "params": r["params"],
+                    "created": r["created"],
+                }
+            )
+        return claimed
+
+
+def record_rpc_result(
+    rid: str,
+    *,
+    ok: bool,
+    result: Any = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Store the first terminal result and ignore duplicate late answers."""
+    with _lock:
+        r = _rpc.get(rid)
+        if not r:
+            return {"found": False, "accepted": False, "status": None}
+        if r["status"] in ("done", "error"):
+            return {
+                "found": True,
+                "accepted": False,
+                "status": r["status"],
+            }
+        if ok:
+            r["status"] = "done"
+            r["result"] = result
+            r["error"] = None
+        else:
+            r["status"] = "error"
+            r["error"] = error or "unknown"
+            r["result"] = result
+        return {"found": True, "accepted": True, "status": r["status"]}
+
+
 def wait_rpc(rid: str, timeout_sec: float = 90.0) -> dict[str, Any]:
     import time
 
@@ -588,19 +647,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # —— 实况查询（扩展代理 pan API）——
         if path == "/pan/rpc/pending":
-            with _lock:
-                _purge_rpc_unlocked()
-                pending = [
-                    {
-                        "id": r["id"],
-                        "op": r["op"],
-                        "params": r["params"],
-                        "created": r["created"],
-                    }
-                    for r in _rpc.values()
-                    if r["status"] == "pending"
-                ]
-            self._json(200, {"requests": pending})
+            self._json(200, {"requests": claim_pending_rpcs()})
             return
         if path.startswith("/pan/rpc/"):
             rid = path[len("/pan/rpc/") :].strip("/")
@@ -810,20 +857,24 @@ class Handler(BaseHTTPRequestHandler):
             if not rid:
                 self._json(400, {"error": "id required"})
                 return
-            with _lock:
-                r = _rpc.get(rid)
-                if not r:
-                    self._json(404, {"error": "rpc not found"})
-                    return
-                if data.get("ok", True):
-                    r["status"] = "done"
-                    r["result"] = data.get("result")
-                    r["error"] = None
-                else:
-                    r["status"] = "error"
-                    r["error"] = data.get("error") or "unknown"
-                    r["result"] = data.get("result")
-            self._json(200, {"ok": True, "id": rid})
+            recorded = record_rpc_result(
+                str(rid),
+                ok=bool(data.get("ok", True)),
+                result=data.get("result"),
+                error=data.get("error"),
+            )
+            if not recorded["found"]:
+                self._json(404, {"error": "rpc not found", "id": rid})
+                return
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "id": rid,
+                    "accepted": recorded["accepted"],
+                    "status": recorded["status"],
+                },
+            )
             return
 
         if path == "/push":

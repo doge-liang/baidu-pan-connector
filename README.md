@@ -94,6 +94,7 @@ python -B "$TOOLS\pan_task.py" push "$TASKS\my.json" --auto --wait
 - Keep real task packs, bridge state, logs, caches, and generated indexes out of Git.
 - Do not run Python inside `extension/`; Chrome rejects generated underscore-prefixed paths such as `__pycache__`.
 - Keep the browser extension status-only. User confirmation and task control belong in the Agent and CLI workflow.
+- The bridge atomically claims live RPC requests so multiple open Pan tabs and the MV3 service worker cannot execute the same upload or mutation concurrently.
 - Build the Chrome Web Store package with `extension/store/pack.py`; the package contains only extension runtime files and icons.
 
 ## License
