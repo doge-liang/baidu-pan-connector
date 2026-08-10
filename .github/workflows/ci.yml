@@ -73,6 +73,26 @@ jobs:
           python -B skills/baidu-pan-connector/scripts/sync_install.py \
             --install-dir "$target" --apply --check
 
+      - name: Verify a Codex Skill entry resolves to the canonical source
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/skills/baidu-pan-connector"
+          entry="$RUNNER_TEMP/codex-skills/baidu-pan-connector"
+          mkdir -p "$(dirname "$entry")"
+          ln -s "$source" "$entry"
+          python -B skills/baidu-pan-connector/scripts/sync_install.py \
+            --install-dir "$entry" --check --require-source-link
+
+      - name: Prove strict source-link mode rejects an installation copy
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/baidu-pan-connector-install"
+          if python -B skills/baidu-pan-connector/scripts/sync_install.py \
+            --install-dir "$target" --check --require-source-link; then
+            echo "strict source-link check accepted a copied installation" >&2
+            exit 1
+          fi
+
       - name: Prove source drift is detected
         run: |
           set -euo pipefail

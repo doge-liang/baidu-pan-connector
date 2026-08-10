@@ -37,6 +37,7 @@ the transport here is **extension + bridge**, not `bdpan`. See [SOURCES.md](./SO
 | `tasks/` | Non-sensitive task-pack examples only |
 | `scripts/check_install.py` | Install / readiness check |
 | `scripts/start_connector.ps1` | Start the bridge with external runtime state |
+| `scripts/sync_install.py` | Verify source-link or controlled-copy consistency |
 | `references/install.md` | Human install guide |
 
 ```powershell
@@ -97,6 +98,7 @@ Ordered checklist (same idea as baidu-drive’s 安装检查 → 登录检查):
 1. **Package + bridge + tab**
 
 ```powershell
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 python -B "$S\scripts\check_install.py"
 ```
 
@@ -248,10 +250,10 @@ npx skills add https://github.com/baidu-netdisk/bdpan-storage/skills --skill bai
 
 ## Extension reload after upgrade
 
-After updating this skill’s `extension/`, open `chrome://extensions` → **Reload** on *Baidu Pan Agent Connector* (need **0.5.0+** for upload). Load path:
+After updating this skill’s `extension/`, open `chrome://extensions` → **Reload** on *Baidu Pan Agent Connector* (need **0.5.0+** for upload). On the development machine, Chrome must load the canonical checkout directly:
 
 ```text
-%USERPROFILE%\.codex\skills\baidu-pan-connector\extension
+D:\project\baidu-pan-connector\skills\baidu-pan-connector\extension
 ```
 
 ---

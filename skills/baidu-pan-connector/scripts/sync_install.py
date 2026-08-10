@@ -96,18 +96,49 @@ def check(target: Path) -> list[str]:
     return errors
 
 
+def source_link_error(entry: Path) -> str | None:
+    """Return an error unless a distinct install entry resolves to this source.
+
+    Comparing resolved paths works for POSIX symlinks and Windows directory
+    junctions without depending on elevated symlink privileges.
+    """
+
+    source = SKILL_ROOT.resolve()
+    if not entry.exists():
+        return f"installation entry is missing: {entry}"
+    if entry.absolute() == source:
+        return "installation entry is the source directory itself, not a distinct link"
+    try:
+        resolved = entry.resolve(strict=True)
+    except OSError as error:
+        return f"installation entry cannot be resolved: {entry}: {error}"
+    if resolved != source:
+        return f"installation entry does not resolve to source: {entry} -> {resolved}; expected {source}"
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-dir", type=Path, default=default_install_dir())
     parser.add_argument("--apply", action="store_true", help="copy the managed source files")
     parser.add_argument("--check", action="store_true", help="verify byte-for-byte consistency")
+    parser.add_argument(
+        "--require-source-link",
+        action="store_true",
+        help="also require the install entry to resolve directly to this source tree",
+    )
     args = parser.parse_args()
     if not args.apply and not args.check:
         parser.error("choose --apply, --check, or both")
+    if args.require_source_link and not args.check:
+        parser.error("--require-source-link requires --check")
 
-    target = args.install_dir.expanduser().resolve(strict=False)
+    # Keep the requested path separate from its resolved target so strict
+    # source-link validation can distinguish a junction from the source itself.
+    target = args.install_dir.expanduser().absolute()
+    resolved_target = target.resolve(strict=False)
     source = SKILL_ROOT.resolve()
-    if args.apply and target == source:
+    if args.apply and resolved_target == source:
         print(f"install target already resolves to source: {source}")
     elif args.apply:
         install(source_files(), target)
@@ -115,6 +146,10 @@ def main() -> int:
 
     if args.check:
         errors = check(target)
+        if args.require_source_link:
+            link_error = source_link_error(target)
+            if link_error:
+                errors.insert(0, link_error)
         if errors:
             for error in errors:
                 print(f"[FAIL] {error}", file=sys.stderr)

@@ -69,8 +69,13 @@ Set `BAIDU_PAN_CONNECTOR_STATE_DIR` to an absolute path to override the default.
 $S = Join-Path $env:USERPROFILE '.codex\skills\baidu-pan-connector'
 powershell -File "$S\scripts\start_connector.ps1" -Background
 python -B "$S\scripts\check_install.py"
-python -B "$S\scripts\sync_install.py" --check
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 ```
+
+The strict check confirms that the Codex Skill entry is a directory link to
+this checkout, rather than a drifting duplicate. For a deliberately copied
+installation, omit `--require-source-link`; byte-for-byte consistency is still
+verified.
 
 Everyday commands:
 

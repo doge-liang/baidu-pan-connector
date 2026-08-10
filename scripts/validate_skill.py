@@ -51,10 +51,17 @@ def main() -> None:
     if missing:
         fail(f"required files missing: {missing}")
 
-    searchable = [SKILL / "SKILL.md", SKILL / "references" / "install.md"]
+    searchable = [
+        path
+        for path in SKILL.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in {".md", ".py", ".ps1", ".js", ".json", ".yaml", ".yml"}
+        and not any(part in {"dist", "__pycache__"} for part in path.parts)
+    ]
     for path in searchable:
-        if "tools\\connector.py" in path.read_text(encoding="utf-8"):
-            fail(f"stale nonexistent tools\\connector.py reference: {path}")
+        text = path.read_text(encoding="utf-8")
+        if re.search(r"(?:tools[\\/]|/tools/)connector\.py", text):
+            fail(f"stale nonexistent connector.py reference: {path}")
 
     tracked = subprocess.check_output(
         ["git", "ls-files", "skills/baidu-pan-connector"], cwd=ROOT, text=True

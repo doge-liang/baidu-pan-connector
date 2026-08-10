@@ -28,6 +28,7 @@ Override the runtime root with the absolute path environment variable
 $S = Join-Path $env:USERPROFILE ".codex\skills\baidu-pan-connector"
 powershell -File "$S\scripts\start_connector.ps1" -Background
 python -B "$S\scripts\check_install.py"
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 ```
 
 Load the unpacked Chrome extension from the canonical checkout:
@@ -42,9 +43,10 @@ open a logged-in `https://pan.baidu.com` tab. Reload the extension after updates
 ## Verify installation consistency
 
 ```powershell
-python -B "$S\scripts\sync_install.py" --check
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 ```
 
-The check must pass before publishing or troubleshooting runtime behavior. The
-source directory contains only task examples; write real task packs under the
-external runtime `tasks` directory.
+The strict check must pass before publishing or troubleshooting runtime
+behavior. It proves the Codex Skill entry resolves to the canonical checkout.
+The source directory contains only task examples; write real task packs under
+the external runtime `tasks` directory.
