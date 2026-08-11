@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""经 bridge 查询/上传百度网盘（需：bridge 运行 + pan.baidu.com 已开 + 扩展已加载）。
+"""经 bridge 查询/传输百度网盘（需：bridge 运行 + pan.baidu.com 已开 + 扩展已加载）。
 
 示例:
   python pan_query.py list "/"
@@ -7,6 +7,8 @@
   python pan_query.py search "关键词" --dir "/"
   python pan_query.py upload "D:\\local\\file.pdf" --dest "/apps/demo"
   python pan_query.py upload "D:\\local\\file.pdf" --path "/apps/demo/file.pdf"
+  python pan_query.py download "/apps/demo/file.pdf" --dest "D:\\downloads"
+  python pan_query.py download "/apps/demo/file.pdf" --local "D:\\downloads\\file.pdf"
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ def post(url: str, body: dict, timeout: float = 120) -> dict:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Baidu pan live query/upload via extension bridge")
+    ap = argparse.ArgumentParser(description="Baidu pan live query/transfer via extension bridge")
     ap.add_argument(
         "op",
         choices=[
@@ -47,6 +49,7 @@ def main() -> None:
             "exists",
             "search",
             "upload",
+            "download",
             "rpc",
             "crawl-start",
             "crawl-status",
@@ -59,14 +62,15 @@ def main() -> None:
     )
     ap.add_argument("arg", nargs="?", default="", help="dir / path / key / local file / rpc json")
     ap.add_argument("--dir", default="/", help="search root")
-    ap.add_argument("--dest", default="", help="upload: remote directory")
+    ap.add_argument("--dest", default="", help="upload: remote dir; download: local dir")
     ap.add_argument("--path", default="", help="upload: full remote path")
-    ap.add_argument("--newname", default="", help="upload: remote filename")
+    ap.add_argument("--local", default="", help="download: full local target path")
+    ap.add_argument("--newname", default="", help="target filename when using --dest")
     ap.add_argument(
         "--ondup",
         default="fail",
         choices=["fail", "overwrite", "newcopy"],
-        help="upload: if remote exists",
+        help="if target exists (download supports fail/overwrite)",
     )
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--max", type=int, default=500)
@@ -75,7 +79,12 @@ def main() -> None:
         action="store_true",
         help="crawl-start: 完成后自动上传并重建索引",
     )
-    ap.add_argument("--timeout", type=float, default=0, help="rpc wait seconds (upload default 600)")
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=0,
+        help="rpc wait seconds (upload default 600; download default 3600)",
+    )
     ap.add_argument("--bridge", default=BRIDGE)
     args = ap.parse_args()
 
@@ -123,6 +132,44 @@ def main() -> None:
             print("upload requires --dest DIR or --path /full/remote/path", file=sys.stderr)
             sys.exit(2)
         out = post(f"{args.bridge}/pan/rpc", body, timeout=max(args.timeout or 600, 120))
+    elif args.op == "download":
+        remote = args.arg
+        if not remote or not remote.startswith("/"):
+            print("download requires an absolute remote path", file=sys.stderr)
+            sys.exit(2)
+        if args.ondup == "newcopy":
+            print("download --ondup supports fail or overwrite", file=sys.stderr)
+            sys.exit(2)
+        if bool(args.local) == bool(args.dest):
+            print("download requires exactly one of --local FILE or --dest DIR", file=sys.stderr)
+            sys.exit(2)
+        if args.local:
+            if args.newname:
+                print("download --newname is only valid with --dest", file=sys.stderr)
+                sys.exit(2)
+            local_target = Path(args.local).expanduser()
+        else:
+            filename = args.newname or remote.rstrip("/").rsplit("/", 1)[-1]
+            if not filename:
+                print("download remote path must name a file", file=sys.stderr)
+                sys.exit(2)
+            local_target = Path(args.dest).expanduser() / filename
+        if not local_target.is_absolute():
+            print(f"download local target must be absolute: {local_target}", file=sys.stderr)
+            sys.exit(2)
+        timeout = args.timeout or 3600
+        out = post(
+            f"{args.bridge}/pan/rpc",
+            {
+                "op": "download",
+                "path": remote,
+                "local": str(local_target.resolve()),
+                "wait": True,
+                "timeout": timeout,
+                "ondup": args.ondup,
+            },
+            timeout=max(timeout, 120),
+        )
     elif args.op == "crawl-start":
         out = post(
             f"{args.bridge}/pan/rpc",
@@ -180,8 +227,8 @@ def main() -> None:
             if args.op == "index-status":
                 return
             sys.exit(1)
-    # upload result nested
-    if args.op == "upload":
+    # Transfer results are nested under the RPC envelope.
+    if args.op in ("upload", "download"):
         res = out.get("result") if isinstance(out.get("result"), dict) else out
         if res and res.get("ok") is False:
             sys.exit(1)

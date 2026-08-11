@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Baidu Pan Agent Connector (Unofficial)",
-  "version": "0.6.2",
-  "description": "Unofficial Agent connector for pan.baidu.com with status-only UI, bridge task execution, and local file upload.",
+  "version": "0.7.14",
+  "description": "Unofficial Agent connector for pan.baidu.com with status-only UI and verified local file upload/download.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -16,11 +16,17 @@
       "48": "icons/icon48.png"
     }
   },
-  "permissions": ["storage"],
+  "permissions": [
+    "storage",
+    "downloads",
+    "declarativeNetRequestWithHostAccess",
+    "scripting"
+  ],
   "host_permissions": [
     "https://pan.baidu.com/*",
     "https://yun.baidu.com/*",
     "https://*.pcs.baidu.com/*",
+    "https://*.baidupcs.com/*",
     "http://127.0.0.1:27865/*",
     "http://localhost:27865/*"
   ],

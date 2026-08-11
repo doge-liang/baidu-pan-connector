@@ -18,3 +18,4 @@ skills/baidu-pan-connector/tasks/*
 !skills/baidu-pan-connector/tasks/.gitkeep
 !skills/baidu-pan-connector/tasks/example-mkdir.json
 !skills/baidu-pan-connector/tasks/example-upload.json
+!skills/baidu-pan-connector/tasks/example-download.json

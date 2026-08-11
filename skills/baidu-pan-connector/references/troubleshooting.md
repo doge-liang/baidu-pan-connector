@@ -89,5 +89,6 @@ Full-disk crawl is slow and heavy. Run only when the user explicitly wants it. `
 | Stack | Extension + bridge | `bdpan` CLI |
 | Tree | Full account tree | Often app-limited paths |
 | Local upload | Supported through bridge registration and extension 0.5.0+ | Often supported by bdpan |
+| Local download | Supported through verified bridge streaming and extension 0.7.0+ | Often supported by bdpan |
 
 Pick the stack the user actually has running.

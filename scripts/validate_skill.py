@@ -75,7 +75,13 @@ def main() -> None:
         path
         for path in tracked
         if "/tasks/" in path
-        and Path(path).name not in {".gitkeep", "example-mkdir.json", "example-upload.json"}
+        and Path(path).name
+        not in {
+            ".gitkeep",
+            "example-mkdir.json",
+            "example-upload.json",
+            "example-download.json",
+        }
     ]
     if forbidden or real_tasks:
         fail(f"runtime/generated files are tracked: {forbidden + real_tasks}")

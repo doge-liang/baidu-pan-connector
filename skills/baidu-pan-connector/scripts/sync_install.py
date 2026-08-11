@@ -13,7 +13,12 @@ from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_NAME = ".baidu-pan-connector-install.json"
-TASK_TEMPLATES = {".gitkeep", "example-mkdir.json", "example-upload.json"}
+TASK_TEMPLATES = {
+    ".gitkeep",
+    "example-mkdir.json",
+    "example-upload.json",
+    "example-download.json",
+}
 
 
 def default_install_dir() -> Path:

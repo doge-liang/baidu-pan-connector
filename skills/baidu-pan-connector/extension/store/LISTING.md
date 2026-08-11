@@ -42,8 +42,9 @@ This extension is a capability connector between Baidu Netdisk (pan.baidu.com) a
 What it does
 • Runs only when you are logged into pan.baidu.com in Chrome
 • Receives structured task packs (JSON) from a local Agent bridge on 127.0.0.1:27865
-• Executes disclosed operations such as list / mkdir / move / rename / copy / delete (delete uses Baidu recycle bin)
-• Shows a lightweight panel for status, fallback import, and observation
+• Executes disclosed operations such as list / mkdir / move / rename / copy / delete / upload / download (delete uses Baidu recycle bin)
+• Uses Chrome's native authenticated download into an isolated staging file, then verifies size plus available MD5 through the local bridge before final placement and staging cleanup
+• Shows a lightweight status and Debug-log panel
 
 What it does NOT do
 • It is not an official Baidu product and is not affiliated with Baidu
@@ -79,7 +80,9 @@ Unofficial software. Use of Baidu Netdisk is subject to Baidu’s terms. You are
 能做什么
 • 仅在你已登录 pan.baidu.com 时工作
 • 从本机任务桥（默认 127.0.0.1:27865）接收结构化任务包
-• 执行 list / mkdir / move / rename / copy / delete 等（删除走网盘回收站）
+• 执行 list / mkdir / move / rename / copy / delete / upload / download 等（删除走网盘回收站）
+• 下载由 Chrome 携带网页登录 Cookie 写入隔离暂存文件，再经本机桥校验大小及可用 MD5 后最终放置并清理暂存
+• 下载签名在发起任务的网盘页主世界中按页面实时上下文计算；扩展不读取或导出 Cookie
 • 提供红、绿、蓝连接状态、当前任务摘要和 Debug 日志
 
 不做什么

@@ -12,11 +12,11 @@
 | `manifest.json` 等 | Chrome MV3 扩展（**仅**前端；勿在此目录跑 Python） |
 | `../tools/bridge.py` | `127.0.0.1:27865` 任务桥 + 索引 + 实况 RPC + run 状态 |
 | `../tools/pan_task.py` | **主控 CLI**：push / wait / status |
-| `../tools/pan_query.py` | 实况 list/exists/search / crawl / upload |
+| `../tools/pan_query.py` | 实况 list/exists/search / crawl / upload / download |
 | `%USERPROFILE%/.codex/state/baidu-pan-connector/tasks/*.json` | **私人**任务包工作区，位于源码外 |
 | `store/` | 上架文案、隐私政策、打包脚本 |
 
-版本 **0.6.0+** 使用只读 Connector 界面：三色状态灯、当前任务摘要和 Debug 日志；**0.3.0+** 支持 `--auto` 全自动执行。版本 **0.6.1+** 会在扩展重载使旧页面上下文失效时停止轮询，并提示刷新页面。版本 **0.6.2+** 统一使用独立仓库与外部运行状态目录。
+版本 **0.6.0+** 使用只读 Connector 界面：三色状态灯、当前任务摘要和 Debug 日志；**0.3.0+** 支持 `--auto` 全自动执行。版本 **0.6.1+** 会在扩展重载使旧页面上下文失效时停止轮询，并提示刷新页面。版本 **0.6.2+** 统一使用独立仓库与外部运行状态目录。版本 **0.7.14+** 按当前网页前端协议，在发起任务的网盘页主世界调用 `/api/gettemplatevariable`，使用扩展内置、可审计的等价算法处理实时签名输入，并以 GET 请求调用 `/api/download`；扩展不会执行服务端下发的代码字符串，旧 `yunData` 和 HTML 解析仅作为兼容回退。取得 dlink 后，在登录中的网盘文档内触发隐藏子框架导航，并用短时、精确 URL 匹配的 `downloads.onDeterminingFilename` 捕获附件。若页面上下文未产生附件，再依次尝试浏览器 UA、字面值 `netdisk`、字面值 `pan.baidu.com`、PCS 兼容 UA 和最多 4 MiB 的 bridge 顺序分块流。所有成功路径最终均由 bridge 校验大小与可用 MD5 并原子落盘。
 
 ## 安装扩展（开发）
 
@@ -73,7 +73,7 @@ python -B "$S\tools\pan_task.py" health
 
 CLI `--auto` 时 bridge 写入 `auto` / `auto_policy` / `push_seq`；扩展按 `push_seq` 覆盖导入并执行。
 
-支持 `op`：`mkdir` / `copy` / `copy-batch` / `move` / `rename` / `delete` / `upload` / `normalize-dir`。
+支持 `op`：`mkdir` / `copy` / `copy-batch` / `move` / `rename` / `delete` / `upload` / `download` / `normalize-dir`。
 
 ## Chrome Web Store
 

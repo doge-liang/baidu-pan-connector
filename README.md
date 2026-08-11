@@ -2,7 +2,7 @@
 
 Baidu Netdisk Agent Connector combines a Codex skill, a local loopback bridge,
 and an unpacked Chrome extension. It can list, search, create, move, rename,
-copy, delete, and upload files through an already logged-in `pan.baidu.com`
+copy, delete, upload, and download files through an already logged-in `pan.baidu.com`
 session.
 
 This is unofficial software and is not affiliated with Baidu. It does not
@@ -86,6 +86,7 @@ python -B "$TOOLS\pan_task.py" health
 python -B "$TOOLS\pan_query.py" list '/' --max 20
 python -B "$TOOLS\pan_query.py" search '关键词' --dir '/'
 python -B "$TOOLS\pan_query.py" upload 'D:\local\file.pdf' --dest '/remote/dir'
+python -B "$TOOLS\pan_query.py" download '/remote/dir/file.pdf' --dest 'D:\downloads'
 python -B "$TOOLS\pan_task.py" push "$TASKS\my.json" --auto --wait
 ```
 
@@ -94,7 +95,8 @@ python -B "$TOOLS\pan_task.py" push "$TASKS\my.json" --auto --wait
 - Keep real task packs, bridge state, logs, caches, and generated indexes out of Git.
 - Do not run Python inside `extension/`; Chrome rejects generated underscore-prefixed paths such as `__pycache__`.
 - Keep the browser extension status-only. User confirmation and task control belong in the Agent and CLI workflow.
-- The bridge atomically claims live RPC requests so multiple open Pan tabs and the MV3 service worker cannot execute the same upload or mutation concurrently.
+- The bridge atomically claims live RPC requests so multiple open Pan tabs and the MV3 service worker cannot execute the same transfer or mutation concurrently.
+- Downloads stream through the logged-in browser to a same-directory partial file; the bridge verifies size and available MD5 metadata before atomically installing the target.
 - Build the Chrome Web Store package with `extension/store/pack.py`; the package contains only extension runtime files and icons.
 
 ## License

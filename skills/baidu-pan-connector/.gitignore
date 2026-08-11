@@ -8,6 +8,7 @@ tasks/*
 !tasks/.gitkeep
 !tasks/example-mkdir.json
 !tasks/example-upload.json
+!tasks/example-download.json
 
 # Python 和扩展构建产物。
 **/__pycache__/

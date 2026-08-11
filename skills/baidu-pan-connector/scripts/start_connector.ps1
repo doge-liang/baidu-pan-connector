@@ -18,7 +18,13 @@ New-Item -ItemType Directory -Path $logs, $pythonCache -Force | Out-Null
 
 $env:BAIDU_PAN_CONNECTOR_STATE_DIR = $StateRoot
 $env:PYTHONPYCACHEPREFIX = $pythonCache
-$python = (Get-Command python -ErrorAction Stop).Source
+# Some managed Windows environments expose `python` through a persistent
+# wrapper process. Prefer the Python launcher to resolve the real interpreter
+# so the PID written below owns the listening socket itself.
+$python = (& py -3 -c "import sys; print(sys.executable)").Trim()
+if (-not $python -or -not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Unable to resolve the Python interpreter executable.'
+}
 
 if ($Background) {
     $stdout = Join-Path $logs 'bridge-stdout.log'
@@ -32,7 +38,7 @@ if ($Background) {
         -PassThru
     Set-Content -LiteralPath (Join-Path $StateRoot 'bridge.pid') -Value $process.Id
     Write-Output "Baidu Pan Connector started: pid=$($process.Id) state=$StateRoot"
-    exit 0
+    return
 }
 
 & $python -B $bridge

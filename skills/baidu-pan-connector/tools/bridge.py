@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import os
 import secrets
 import subprocess
 import threading
@@ -43,8 +44,6 @@ from runtime_paths import ensure_runtime_dirs, runtime_root
 
 HOST = "127.0.0.1"
 PORT = 27865
-
-import os
 
 # Skill layout:  …/baidu-pan-connector/tools/bridge.py
 # Runtime data:  BAIDU_PAN_CONNECTOR_STATE_DIR or ~/.codex/state/baidu-pan-connector
@@ -93,6 +92,7 @@ _runs: dict[str, dict[str, Any]] = {}
 _rpc_seq = 0
 _rpc: dict[str, dict[str, Any]] = {}
 _RPC_TTL_SEC = 180
+_RPC_DISPATCH_TTL_SEC = 6 * 3600
 
 # 本机文件暂存：供扩展 fetch 后走网盘网页上传 API（扩展无本地盘权限）
 # token → { path, name, size, content_md5, block_list, block_size, created }
@@ -100,6 +100,238 @@ _local_files: dict[str, dict[str, Any]] = {}
 _LOCAL_TTL_SEC = 3600
 _LOCAL_MAX_BYTES = int(os.environ.get("BAIDU_PAN_UPLOAD_MAX_BYTES") or (8 * 1024**3))  # 8 GiB
 _BLOCK_SIZE = 4 * 1024 * 1024  # 网盘网页端分块 4MiB
+
+# 网盘下载暂存：扩展持有登录态并读取远端字节，bridge 只负责原子落盘。
+# token → {target, temp, expected_size, expected_md5, written, created, lock, ondup}
+_downloads: dict[str, dict[str, Any]] = {}
+_DOWNLOAD_TTL_SEC = 24 * 3600
+_DOWNLOAD_CHUNK_MAX_BYTES = int(
+    os.environ.get("BAIDU_PAN_DOWNLOAD_CHUNK_MAX_BYTES") or (8 * 1024**2)
+)
+
+
+def _purge_downloads_unlocked() -> None:
+    now = time.time()
+    dead = [
+        token
+        for token, rec in _downloads.items()
+        if now - float(rec.get("updated") or rec.get("created") or 0)
+        > _DOWNLOAD_TTL_SEC
+    ]
+    for token in dead:
+        rec = _downloads.pop(token, None)
+        if not rec:
+            continue
+        try:
+            Path(rec["temp"]).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def register_download(
+    local_path: str,
+    *,
+    expected_size: int | None = None,
+    expected_md5: str = "",
+    ondup: str = "fail",
+) -> dict[str, Any]:
+    """Create a same-directory temporary file for an authenticated browser download."""
+    raw = Path(local_path).expanduser()
+    if not raw.is_absolute():
+        raise ValueError("local download path must be absolute")
+    target = raw.resolve(strict=False)
+    if target.name in ("", ".", ".."):
+        raise ValueError("local download path must name a file")
+    if target.exists() and target.is_dir():
+        raise IsADirectoryError(f"download target is a directory: {target}")
+    ondup = str(ondup or "fail").lower()
+    if ondup not in ("fail", "overwrite"):
+        raise ValueError("download ondup must be fail or overwrite")
+    if target.exists() and ondup == "fail":
+        raise FileExistsError(f"local target already exists: {target}")
+    if expected_size is not None and int(expected_size) < 0:
+        raise ValueError("download size must be non-negative")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(24)
+    temp = target.parent / f".{target.name}.{token}.part"
+    # Exclusive creation prevents two registrations from sharing a partial file.
+    with temp.open("xb"):
+        pass
+    rec = {
+        "token": token,
+        "target": str(target),
+        "temp": str(temp),
+        "expected_size": int(expected_size) if expected_size is not None else None,
+        "expected_md5": str(expected_md5 or "").lower(),
+        "written": 0,
+        "created": time.time(),
+        "updated": time.time(),
+        "ondup": ondup,
+        "lock": threading.Lock(),
+    }
+    with _lock:
+        _purge_downloads_unlocked()
+        _downloads[token] = rec
+    return {
+        "ok": True,
+        "token": token,
+        "path": rec["target"],
+        "size": rec["expected_size"],
+        "chunk_url": f"http://{HOST}:{PORT}/download/{token}",
+    }
+
+
+def write_download_chunk(token: str, offset: int, data: bytes) -> dict[str, Any]:
+    with _lock:
+        _purge_downloads_unlocked()
+        rec = _downloads.get(token)
+    if not rec:
+        raise FileNotFoundError("download token not found or expired")
+    with rec["lock"]:
+        if offset != int(rec["written"]):
+            raise ValueError(
+                f"download offset mismatch: expected {rec['written']}, got {offset}"
+            )
+        expected_size = rec.get("expected_size")
+        if expected_size is not None and offset + len(data) > int(expected_size):
+            raise ValueError("download exceeds expected size")
+        temp = Path(rec["temp"])
+        if not temp.is_file() or temp.stat().st_size != offset:
+            raise ValueError("download partial file size changed unexpectedly")
+        with temp.open("ab") as stream:
+            stream.write(data)
+            stream.flush()
+        rec["written"] = offset + len(data)
+        rec["updated"] = time.time()
+        return {
+            "ok": True,
+            "token": token,
+            "written": rec["written"],
+            "expected_size": expected_size,
+        }
+
+
+def abort_download(token: str) -> dict[str, Any]:
+    with _lock:
+        rec = _downloads.pop(token, None)
+    if not rec:
+        return {"ok": True, "token": token, "removed": False}
+    with rec["lock"]:
+        Path(rec["temp"]).unlink(missing_ok=True)
+    return {"ok": True, "token": token, "removed": True}
+
+
+def import_native_download(token: str, source_path: str) -> dict[str, Any]:
+    """Copy a Chrome-managed staging download into the registered partial file."""
+    with _lock:
+        _purge_downloads_unlocked()
+        rec = _downloads.get(token)
+    if not rec:
+        raise FileNotFoundError("download token not found or expired")
+
+    raw_source = Path(source_path).expanduser()
+    if not raw_source.is_absolute():
+        raise ValueError("native download source must be absolute")
+    if raw_source.is_symlink():
+        raise ValueError("native download source must not be a symlink")
+    source = raw_source.resolve(strict=True)
+    if not source.is_file():
+        raise FileNotFoundError(f"native download source is not a file: {source}")
+
+    # Chrome resolves the suggested filename against the configured download
+    # root, which need not be the conventional Downloads directory. A server
+    # Content-Disposition header can also override the suggested basename. The
+    # preferred binding is therefore the unguessable transfer token; when
+    # Chrome replaces that name, require a fresh file plus the exact MD5 from
+    # Baidu metadata before accepting it for import.
+    token_named = source.name == f"{token}.download"
+    expected_md5 = str(rec.get("expected_md5") or "").lower()
+    hash_bound = (
+        len(expected_md5) == 32
+        and all(char in "0123456789abcdef" for char in expected_md5)
+        and source.stat().st_mtime >= float(rec["created"]) - 2.0
+    )
+    if not token_named and not hash_bound:
+        raise ValueError(
+            "native download source is neither token-named nor bound by fresh MD5 metadata"
+        )
+
+    with rec["lock"]:
+        temp = Path(rec["temp"])
+        if int(rec.get("written") or 0) != 0 or not temp.is_file() or temp.stat().st_size != 0:
+            raise ValueError("download partial file is not empty before native import")
+        actual_size = source.stat().st_size
+        expected_size = rec.get("expected_size")
+        if expected_size is not None and actual_size != int(expected_size):
+            raise ValueError(
+                f"native download size mismatch: expected {expected_size}, got {actual_size}"
+            )
+        written = 0
+        with source.open("rb") as src, temp.open("wb") as dst:
+            for chunk in iter(lambda: src.read(_BLOCK_SIZE), b""):
+                dst.write(chunk)
+                written += len(chunk)
+            dst.flush()
+        rec["written"] = written
+        rec["updated"] = time.time()
+
+    completed = complete_download(token)
+    # The bridge has already copied and verified the bytes, so it can remove
+    # the Chrome staging file deterministically. The extension still removes
+    # the download history item and provides a second cleanup attempt.
+    source_removed = False
+    for _ in range(5):
+        try:
+            source.unlink(missing_ok=True)
+            source_removed = not source.exists()
+            break
+        except PermissionError:
+            time.sleep(0.1)
+    completed["source_removed"] = source_removed
+    return completed
+
+
+def complete_download(token: str) -> dict[str, Any]:
+    with _lock:
+        rec = _downloads.get(token)
+    if not rec:
+        raise FileNotFoundError("download token not found or expired")
+    with rec["lock"]:
+        temp = Path(rec["temp"])
+        target = Path(rec["target"])
+        if not temp.is_file():
+            raise FileNotFoundError("download partial file is missing")
+        actual_size = temp.stat().st_size
+        expected_size = rec.get("expected_size")
+        if expected_size is not None and actual_size != int(expected_size):
+            raise ValueError(
+                f"download size mismatch: expected {expected_size}, got {actual_size}"
+            )
+        digest = hashlib.md5()
+        with temp.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_md5 = digest.hexdigest()
+        expected_md5 = str(rec.get("expected_md5") or "").lower()
+        if expected_md5 and len(expected_md5) == 32 and actual_md5 != expected_md5:
+            temp.unlink(missing_ok=True)
+            raise ValueError(
+                f"download md5 mismatch: expected {expected_md5}, got {actual_md5}"
+            )
+        if target.exists() and rec.get("ondup") == "fail":
+            raise FileExistsError(f"local target appeared during download: {target}")
+        os.replace(temp, target)
+        result = {
+            "ok": True,
+            "token": token,
+            "path": str(target),
+            "size": actual_size,
+            "md5": actual_md5,
+        }
+    with _lock:
+        _downloads.pop(token, None)
+    return result
 
 
 def _purge_local_files_unlocked() -> None:
@@ -324,17 +556,18 @@ def _purge_rpc_unlocked() -> None:
     import time
 
     now = time.time()
+    # A claimed upload/download may legitimately run for hours. Pending and
+    # terminal records remain short-lived, while dispatching work gets a
+    # separate upper bound so the result endpoint survives long transfers.
     dead = [
         i
         for i, r in _rpc.items()
-        if now - r.get("created", 0) > _RPC_TTL_SEC
-        and r.get("status") in ("pending", "done", "error")
-    ]
-    # 只清超时 pending；done 多留一会给取结果
-    dead = [
-        i
-        for i, r in _rpc.items()
-        if now - r.get("created", 0) > _RPC_TTL_SEC
+        if now - r.get("created", 0)
+        > (
+            _RPC_DISPATCH_TTL_SEC
+            if r.get("status") == "dispatching"
+            else _RPC_TTL_SEC
+        )
     ]
     for i in dead:
         _rpc.pop(i, None)
@@ -509,7 +742,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _json(self, code: int, obj: Any) -> None:
@@ -525,6 +758,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self._cors()
         self.end_headers()
+
+    def do_PUT(self) -> None:
+        path = urlparse(self.path).path
+        if not path.startswith("/download/"):
+            self._json(404, {"error": "not found"})
+            return
+        token = path[len("/download/") :].strip("/")
+        if not token or "/" in token:
+            self._json(404, {"error": "download token required"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length < 0 or length > _DOWNLOAD_CHUNK_MAX_BYTES:
+            self.close_connection = True
+            self._json(
+                413,
+                {
+                    "error": "download chunk too large",
+                    "max_bytes": _DOWNLOAD_CHUNK_MAX_BYTES,
+                },
+            )
+            return
+        raw = self.rfile.read(length) if length else b""
+        qs = parse_qs(urlparse(self.path).query)
+        try:
+            offset = int((qs.get("offset") or ["0"])[0])
+            out = write_download_chunk(token, offset, raw)
+        except FileNotFoundError as e:
+            self._json(404, {"ok": False, "error": str(e)})
+            return
+        except (OSError, ValueError) as e:
+            self._json(409, {"ok": False, "error": str(e)})
+            return
+        self._json(200, out)
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -766,6 +1032,76 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, info)
             return
 
+        if path == "/download/register":
+            local = data.get("local") or data.get("path") or ""
+            if not local:
+                self._json(400, {"error": "local absolute file path required"})
+                return
+            try:
+                info = register_download(
+                    str(local),
+                    expected_size=(
+                        int(data["size"])
+                        if data.get("size") is not None
+                        else None
+                    ),
+                    expected_md5=str(data.get("md5") or ""),
+                    ondup=str(data.get("ondup") or "fail"),
+                )
+            except FileExistsError as e:
+                self._json(409, {"ok": False, "error": str(e)})
+                return
+            except (OSError, ValueError) as e:
+                self._json(400, {"ok": False, "error": str(e)})
+                return
+            self._json(200, info)
+            return
+
+        if path == "/download/import":
+            token = str(data.get("token") or "")
+            source = str(data.get("source") or "")
+            if not token or not source:
+                self._json(400, {"error": "token and native source path required"})
+                return
+            try:
+                info = import_native_download(token, source)
+            except FileNotFoundError as e:
+                self._json(404, {"ok": False, "error": str(e)})
+                return
+            except FileExistsError as e:
+                self._json(409, {"ok": False, "error": str(e)})
+                return
+            except (OSError, ValueError) as e:
+                self._json(400, {"ok": False, "error": str(e)})
+                return
+            self._json(200, info)
+            return
+
+        if path.startswith("/download/"):
+            tail = path[len("/download/") :].strip("/")
+            parts = tail.split("/") if tail else []
+            if len(parts) != 2 or parts[1] not in ("complete", "abort"):
+                self._json(404, {"error": "download endpoint not found"})
+                return
+            token, action = parts
+            try:
+                info = (
+                    complete_download(token)
+                    if action == "complete"
+                    else abort_download(token)
+                )
+            except FileNotFoundError as e:
+                self._json(404, {"ok": False, "error": str(e)})
+                return
+            except FileExistsError as e:
+                self._json(409, {"ok": False, "error": str(e)})
+                return
+            except (OSError, ValueError) as e:
+                self._json(400, {"ok": False, "error": str(e)})
+                return
+            self._json(200, info)
+            return
+
         if path == "/index/rebuild":
             with _lock:
                 if _index_status["running"]:
@@ -814,6 +1150,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ondup",
                 "file_token",
                 "token",
+                "md5",
+                "size",
             ):
                 if k in data and k not in params:
                     params[k] = data[k]
@@ -839,7 +1177,13 @@ class Handler(BaseHTTPRequestHandler):
                     if not params.get("newname"):
                         params["newname"] = reg["name"]
             rid = enqueue_rpc(str(op), params)
-            default_timeout = 600.0 if str(op) in ("upload", "upload_file") else 90.0
+            default_timeout = (
+                3600.0
+                if str(op) in ("download", "download_file")
+                else 600.0
+                if str(op) in ("upload", "upload_file")
+                else 90.0
+            )
             if data.get("wait", True):
                 self._json(
                     200,
@@ -1029,7 +1373,8 @@ def main() -> None:
     print(f"[bridge] state={_STATE_DIR}")
     print(
         "[bridge] pan/list  pan/exists  pan/rpc  pan/rpc/pending  pan/rpc/result  "
-        "crawl/upload  index/rebuild  pending  push  run/status  run/result"
+        "download/register  download/<token>  crawl/upload  index/rebuild  "
+        "pending  push  run/status  run/result"
     )
     try:
         httpd.serve_forever()

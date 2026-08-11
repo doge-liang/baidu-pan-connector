@@ -38,6 +38,8 @@ python -B "$TOOLS\pan_query.py" exists "/path"
 python -B "$TOOLS\pan_query.py" search "keyword" --dir "/" --max 50
 python -B "$TOOLS\pan_query.py" upload "D:\local\file.pdf" --dest "/remote/dir"
 python -B "$TOOLS\pan_query.py" upload "D:\local\file.pdf" --path "/remote/dir/file.pdf" --ondup overwrite
+python -B "$TOOLS\pan_query.py" download "/remote/dir/file.pdf" --dest "D:\downloads"
+python -B "$TOOLS\pan_query.py" download "/remote/dir/file.pdf" --local "D:\downloads\renamed.pdf" --ondup overwrite
 python -B "$TOOLS\pan_query.py" crawl-start
 python -B "$TOOLS\pan_query.py" crawl-start --auto-index
 python -B "$TOOLS\pan_query.py" crawl-status

@@ -17,8 +17,8 @@
 | `id` | all | Unique within pack |
 | `op` | all | See table below |
 | `path` | most | Source path, or mkdir target |
-| `dest` | move, copy | Destination **directory** |
-| `newname` | move, rename | New **filename** only |
+| `dest` | move, copy, upload, download | Destination **directory**; remote for upload, local for download |
+| `newname` | move, rename, upload, download | New **filename** only |
 | `risk` | all | `low` / `medium` / `high` |
 | `title` | recommended | Short label for logs/UI |
 | `reason` | no | Optional rationale |
@@ -36,6 +36,7 @@ Do not pre-set task `status` to `done`; `--auto` marks tasks `approved` for the 
 | `copy-batch` | extension-specific | See existing packs if present |
 | `delete` | `path` | Recycle bin; use `risk: high` |
 | `upload` | `local`, `dest` or `path`, optional `newname`, `ondup` | Local file → pan via bridge+extension |
+| `download` | `path`, `local` or `dest`, optional `newname`, `ondup` | Pan file → local via extension+bridge |
 | `normalize-dir` | `path` (+ ext fields) | Use only when you know the semantics |
 
 ### upload
@@ -65,6 +66,33 @@ Do not pre-set task `status` to `done`; `--auto` marks tasks `approved` for the 
 \* Either `path` or `dest` (+ optional `newname`) required.
 
 Flow: bridge hashes file (4MiB blocks) → extension `precreate` → PCS `superfile2` parts → `create`.
+
+### download
+
+```json
+{
+  "id": "dl1",
+  "op": "download",
+  "path": "/remote/dir/file.pdf",
+  "dest": "D:\\downloads",
+  "newname": "file.pdf",
+  "ondup": "fail",
+  "risk": "low",
+  "title": "download file.pdf"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `path` | yes | Absolute remote file path; directories are not recursive |
+| `local` | yes* | Full absolute local target path |
+| `dest` | alt | Absolute local directory (instead of `local`) |
+| `newname` | no | With `dest`; defaults to remote basename |
+| `ondup` | no | `fail` (default) \| `overwrite` |
+
+\* Exactly one of `local` or `dest` is required.
+
+Flow: extension resolves remote metadata and `dlink` → arms an exact-URL, short-lived download capture → the logged-in Pan document triggers the attachment request → Chrome assigns the requested isolated staging filename when possible → bridge imports and checks size and available MD5 → atomic replace → bridge removes the staging file and the extension removes the download-history entry. If Chrome applies a server-provided filename, the bridge additionally requires the file to be newer than the registration and to match both expected length and MD5. Failed transfers remove staging and partial files.
 
 ## Minimal examples
 

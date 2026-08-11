@@ -3,6 +3,688 @@
 
 const BRIDGE = "http://127.0.0.1:27865";
 const POLL_MS = 2500;
+const DOWNLOAD_POLL_MS = 500;
+const DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const PAGE_DOWNLOAD_CAPTURE_TIMEOUT_MS = 20 * 1000;
+const DOWNLOAD_STREAM_CHUNK_BYTES = 4 * 1024 * 1024;
+const DOWNLOAD_HEADER_RULE_IDS = Array.from({ length: 16 }, (_, index) => 9700 + index);
+const DOWNLOAD_HEADER_DOMAINS = [
+  "pcs.baidu.com",
+  "baidupcs.com",
+  "pan.baidu.com",
+  "yun.baidu.com"
+];
+// /api/filemetas yields a web-session PCS link rather than an OAuth OpenAPI
+// link. The PCS endpoint expects the Netdisk client compatibility UA.
+const DOWNLOAD_WEB_USER_AGENT =
+  "netdisk;2.2.51.6;netdisk;10.0.63;PC;android-android";
+const DOWNLOAD_HEADER_PROFILES = [
+  {
+    name: "browser",
+    userAgent: "",
+    referer: "https://pan.baidu.com/disk/main"
+  },
+  {
+    name: "legacy-netdisk",
+    userAgent: "netdisk",
+    referer: "http://pan.baidu.com/disk/home"
+  },
+  {
+    name: "openapi-pan",
+    userAgent: "pan.baidu.com",
+    referer: "https://pan.baidu.com/disk/main"
+  },
+  {
+    name: "pcs-netdisk",
+    userAgent: DOWNLOAD_WEB_USER_AGENT,
+    referer: "https://pan.baidu.com/disk/main"
+  }
+];
+const pageDownloadCaptures = new Map();
+
+async function resolvePageDownloadContextInMainWorld() {
+  function firstValue(sources, names) {
+    for (const source of sources) {
+      if (!source) continue;
+      for (const name of names) {
+        try {
+          const value = source[name];
+          if (value != null && value !== "") return value;
+        } catch (_) {}
+      }
+    }
+    return "";
+  }
+  function localValue(name) {
+    try {
+      if (window.locals && typeof window.locals.get === "function") {
+        return window.locals.get(name);
+      }
+      if (window.locals && window.locals[name] != null) return window.locals[name];
+    } catch (_) {}
+    return "";
+  }
+  function sign2(key, text) {
+    const box = Array.from({ length: 256 }, (_, index) => index);
+    const keyCodes = Array.from({ length: 256 }, (_, index) =>
+      key.charCodeAt(index % key.length)
+    );
+    let j = 0;
+    for (let i = 0; i < 256; i++) {
+      j = (j + box[i] + keyCodes[i]) % 256;
+      [box[i], box[j]] = [box[j], box[i]];
+    }
+    let i = 0;
+    j = 0;
+    let output = "";
+    for (let offset = 0; offset < text.length; offset++) {
+      i = (i + 1) % 256;
+      j = (j + box[i]) % 256;
+      [box[i], box[j]] = [box[j], box[i]];
+      output += String.fromCharCode(
+        text.charCodeAt(offset) ^ box[(box[i] + box[j]) % 256]
+      );
+    }
+    return output;
+  }
+
+  let templateError = "";
+  try {
+    const fields = JSON.stringify(["sign1", "sign2", "sign3", "timestamp"]);
+    const response = await fetch(
+      "/api/gettemplatevariable?fields=" + encodeURIComponent(fields),
+      { credentials: "same-origin", cache: "no-store" }
+    );
+    const payload = await response.json();
+    if (!response.ok || Number(payload && payload.errno) !== 0 || !payload.result) {
+      throw new Error("template variable errno=" + String(payload && payload.errno));
+    }
+    const data = payload.result;
+    const timestamp = Number(data.timestamp);
+    if (
+      !data.sign1 ||
+      !data.sign2 ||
+      !data.sign3 ||
+      !Number.isSafeInteger(timestamp) ||
+      timestamp <= 0
+    ) {
+      throw new Error("template download context incomplete");
+    }
+    const locals = window.locals || {};
+    const userInfo = locals.userInfo || {};
+    const vip = Number(
+      userInfo.vipType ??
+        userInfo.vip_type ??
+        userInfo.vip_identity ??
+        locals.vipType ??
+        0
+    );
+    return {
+      ok: true,
+      // The first-party page evaluates the returned sign2 source. The
+      // extension deliberately does not execute remote code; it applies the
+      // audited, bundled equivalent to the fresh sign1/sign3 inputs instead.
+      sign: btoa(sign2(String(data.sign3), String(data.sign1))),
+      timestamp,
+      vip: Number.isFinite(vip) ? vip : 0,
+      source: "template-variable"
+    };
+  } catch (error) {
+    templateError = String(error && (error.message || error)).slice(0, 120);
+  }
+
+  // Compatibility fallback for historical pages that still expose yunData.
+  const yunData = window.yunData || null;
+  let nestedContext = null;
+  try {
+    if (yunData && typeof yunData.getContext === "function") {
+      nestedContext = yunData.getContext();
+    }
+  } catch (_) {}
+  const sources = [yunData, nestedContext];
+  const sign1 = String(
+    firstValue(sources, ["sign1", "SIGN1"]) || localValue("sign1") || ""
+  );
+  const sign3 = String(
+    firstValue(sources, ["sign3", "SIGN3"]) || localValue("sign3") || ""
+  );
+  const timestamp = Number(
+    firstValue(sources, ["timestamp", "TIMESTAMP"]) || localValue("timestamp") || 0
+  );
+  if (!sign1 || !sign3 || !Number.isSafeInteger(timestamp) || timestamp <= 0) {
+    return {
+      ok: false,
+      error: "main-world download context unavailable; " + templateError
+    };
+  }
+  return {
+    ok: true,
+    sign: btoa(sign2(sign3, sign1)),
+    timestamp,
+    vip: 0,
+    source: "legacy-yundata"
+  };
+}
+
+async function getPageDownloadContextFromMainWorld(sender) {
+  const tabId = sender && sender.tab && sender.tab.id;
+  if (!Number.isInteger(tabId)) throw new Error("页面 tab id 缺失");
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: resolvePageDownloadContextInMainWorld
+  });
+  const result = results && results[0] && results[0].result;
+  if (!result || !result.ok) {
+    throw new Error(String((result && result.error) || "页面主世界签名读取失败"));
+  }
+  return result;
+}
+
+function validateDownloadUrl(rawUrl) {
+  const url = new URL(String(rawUrl || ""));
+  const host = url.hostname.toLowerCase();
+  const allowed =
+    url.protocol === "https:" &&
+    (host === "pan.baidu.com" ||
+      host === "yun.baidu.com" ||
+      host.endsWith(".pcs.baidu.com") ||
+      host.endsWith(".baidupcs.com"));
+  if (!allowed) {
+    throw new Error("拒绝非百度网盘数据域下载地址 host=" + host);
+  }
+  return {
+    url: url.href,
+    host,
+    queryKeys: Array.from(new Set(url.searchParams.keys())).sort()
+  };
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function installDownloadHeaderRules(candidates, profile) {
+  if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateSessionRules) {
+    throw new Error("Chrome 缺少 declarativeNetRequest，需重新加载 0.7.14+ 扩展");
+  }
+  // Each redirect is a new request. Keep the rules on the complete, explicitly
+  // permitted Baidu data-domain families so CDN redirects retain the headers.
+  const hosts = Array.from(
+    new Set([...DOWNLOAD_HEADER_DOMAINS, ...candidates.map((candidate) => candidate.host)])
+  ).slice(0, DOWNLOAD_HEADER_RULE_IDS.length);
+  const requestHeaders = [
+    {
+      header: "Referer",
+      operation: "set",
+      value: profile.referer
+    }
+  ];
+  if (profile.userAgent) {
+    requestHeaders.push({
+      header: "User-Agent",
+      operation: "set",
+      value: profile.userAgent
+    });
+  }
+  const rules = hosts.map((host, index) => ({
+    id: DOWNLOAD_HEADER_RULE_IDS[index],
+    priority: 1,
+    action: {
+      type: "modifyHeaders",
+      requestHeaders
+    },
+    condition: {
+      requestDomains: [host]
+    }
+  }));
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: DOWNLOAD_HEADER_RULE_IDS,
+    addRules: rules
+  });
+  return rules.map((rule) => rule.id);
+}
+
+async function removeDownloadHeaderRules(ruleIds) {
+  if (!ruleIds || !ruleIds.length || !chrome.declarativeNetRequest) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds });
+  } catch (_) {}
+}
+
+async function waitForNativeDownload(downloadId) {
+  const deadline = Date.now() + DOWNLOAD_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const items = await chrome.downloads.search({ id: downloadId });
+    const item = items && items[0];
+    if (!item) throw new Error("Chrome 下载记录不存在 id=" + downloadId);
+    if (item.state === "complete") return item;
+    if (item.state === "interrupted") {
+      let finalHost = "unknown";
+      try {
+        if (item.finalUrl) finalHost = new URL(item.finalUrl).hostname;
+      } catch (_) {}
+      throw new Error(
+        "Chrome 下载中断 " + (item.error || "unknown") + " finalHost=" + finalHost
+      );
+    }
+    await wait(DOWNLOAD_POLL_MS);
+  }
+  throw new Error("Chrome 下载超时 id=" + downloadId);
+}
+
+async function removeNativeDownload(downloadId, state) {
+  if (downloadId == null) return;
+  try {
+    if (state === "in_progress") await chrome.downloads.cancel(downloadId);
+  } catch (_) {}
+  try {
+    await chrome.downloads.removeFile(downloadId);
+  } catch (_) {}
+  try {
+    await chrome.downloads.erase({ id: downloadId });
+  } catch (_) {}
+}
+
+function downloadItemMatchesCapture(item, capture) {
+  for (const value of [item && item.url, item && item.finalUrl]) {
+    if (!value) continue;
+    try {
+      if (new URL(value).href === capture.source.url) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+// Keep this listener registered at service-worker initialization. A capture is
+// armed only for one exact, validated Baidu data URL and expires quickly, so an
+// unrelated user download cannot be renamed into the connector staging area.
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  for (const capture of pageDownloadCaptures.values()) {
+    if (capture.state !== "armed" || Date.now() >= capture.expiresAt) continue;
+    if (!downloadItemMatchesCapture(item, capture)) continue;
+    capture.downloadId = item.id;
+    capture.state = "captured";
+    suggest({
+      filename: "baidu-pan-connector/" + capture.token + ".download",
+      conflictAction: "overwrite"
+    });
+    return;
+  }
+});
+
+async function cancelPageDownloadCapture(captureId) {
+  const capture = pageDownloadCaptures.get(String(captureId || ""));
+  if (!capture) return;
+  pageDownloadCaptures.delete(capture.id);
+  let state = null;
+  if (capture.downloadId != null) {
+    try {
+      const items = await chrome.downloads.search({ id: capture.downloadId });
+      state = items && items[0] && items[0].state;
+    } catch (_) {}
+  }
+  await removeNativeDownload(capture.downloadId, state);
+  await removeDownloadHeaderRules(capture.headerRuleIds);
+}
+
+async function preparePageDownloadCapture(message) {
+  const token = String(message.token || "");
+  const expectedSize = Number(message.expectedSize);
+  const source = validateDownloadUrl(message.dlink);
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(token)) {
+    throw new Error("download token 非法");
+  }
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) {
+    throw new Error("download expectedSize 非法");
+  }
+  for (const capture of pageDownloadCaptures.values()) {
+    if (capture.state === "armed" && Date.now() < capture.expiresAt) {
+      throw new Error("已有页面下载等待捕获，请稍后重试");
+    }
+  }
+
+  const id = crypto.randomUUID();
+  const headerRuleIds = await installDownloadHeaderRules(
+    [source],
+    DOWNLOAD_HEADER_PROFILES[0]
+  );
+  const capture = {
+    id,
+    token,
+    expectedSize,
+    source,
+    headerRuleIds,
+    downloadId: null,
+    state: "armed",
+    expiresAt: Date.now() + PAGE_DOWNLOAD_CAPTURE_TIMEOUT_MS
+  };
+  pageDownloadCaptures.set(id, capture);
+  setTimeout(() => {
+    const current = pageDownloadCaptures.get(id);
+    if (current && current.state === "armed" && Date.now() >= current.expiresAt) {
+      void cancelPageDownloadCapture(id);
+    }
+  }, PAGE_DOWNLOAD_CAPTURE_TIMEOUT_MS + 1000);
+  return {
+    ok: true,
+    captureId: id,
+    sourceHost: source.host,
+    queryKeys: source.queryKeys
+  };
+}
+
+async function awaitPageDownloadCapture(message) {
+  const captureId = String(message.captureId || "");
+  const capture = pageDownloadCaptures.get(captureId);
+  if (!capture) throw new Error("页面下载捕获不存在或已过期");
+
+  let item = null;
+  try {
+    while (capture.downloadId == null && Date.now() < capture.expiresAt) {
+      await wait(DOWNLOAD_POLL_MS);
+    }
+    if (capture.downloadId == null) {
+      throw new Error(
+        "页面未产生可捕获下载 host=" +
+          capture.source.host +
+          " keys=" +
+          capture.source.queryKeys.join(",")
+      );
+    }
+    item = await waitForNativeDownload(capture.downloadId);
+    if (!item.filename) throw new Error("Chrome 下载完成但未返回本地文件路径");
+    if (Number(item.fileSize) !== capture.expectedSize) {
+      throw new Error(
+        "Chrome 下载长度不一致 expected=" +
+          capture.expectedSize +
+          " actual=" +
+          item.fileSize
+      );
+    }
+    const finalHost = item.finalUrl
+      ? validateDownloadUrl(item.finalUrl).host
+      : capture.source.host;
+
+    const result = await bridgeDownloadRequest(
+      "/download/import",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: capture.token, source: item.filename })
+      },
+      "bridge 导入页面下载失败"
+    );
+    return {
+      ...result,
+      transport: "page-native",
+      sourceHost: capture.source.host,
+      finalHost
+    };
+  } finally {
+    pageDownloadCaptures.delete(captureId);
+    await removeNativeDownload(capture.downloadId, item && item.state);
+    await removeDownloadHeaderRules(capture.headerRuleIds);
+  }
+}
+
+async function bridgeDownloadRequest(path, options, label) {
+  const response = await fetch(BRIDGE + path, { cache: "no-store", ...options });
+  const text = await response.text();
+  let result = null;
+  try {
+    result = JSON.parse(text);
+  } catch (_) {}
+  if (!response.ok || !result || !result.ok) {
+    throw new Error(
+      label +
+        " HTTP " +
+        response.status +
+        " " +
+        String((result && result.error) || text || "empty response").slice(0, 300)
+    );
+  }
+  return result;
+}
+
+async function safeResponseErrorSummary(response) {
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (_) {}
+  try {
+    const data = JSON.parse(text);
+    const parts = [];
+    for (const key of ["error_code", "errno"]) {
+      if (Number.isSafeInteger(Number(data && data[key]))) {
+        parts.push(key + "=" + Number(data[key]));
+      }
+    }
+    const message = String((data && (data.error_msg || data.message)) || "")
+      .replace(/https?:\/\/\S+/gi, "[url]")
+      .replace(/[\r\n\t]+/g, " ")
+      .slice(0, 120);
+    if (message) parts.push("message=" + message);
+    return parts.length ? " " + parts.join(" ") : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+async function streamDownloadToBridge(candidates, token, expectedSize) {
+  let response = null;
+  let source = null;
+  const candidateErrors = [];
+  for (const candidate of candidates) {
+    try {
+      const attempt = await fetch(candidate.url, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        redirect: "follow"
+      });
+      if (!attempt.ok) {
+        const detail = await safeResponseErrorSummary(attempt);
+        candidateErrors.push(
+          candidate.host +
+            " keys=" +
+            candidate.queryKeys.join(",") +
+            ": HTTP " +
+            attempt.status +
+            detail
+        );
+        continue;
+      }
+      // Reject an unexpected redirect before any response bytes reach disk.
+      validateDownloadUrl(attempt.url);
+      response = attempt;
+      source = candidate;
+      break;
+    } catch (error) {
+      candidateErrors.push(
+        candidate.host +
+          " keys=" +
+          candidate.queryKeys.join(",") +
+          ": " +
+          String(error && (error.message || error))
+      );
+    }
+  }
+  if (!response || !source) {
+    const error = new Error("全部流式 dlink 候选失败 " + candidateErrors.join(" | "));
+    error.retryWithHeaders = true;
+    throw error;
+  }
+
+  let offset = 0;
+  const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+      for (let start = 0; start < bytes.byteLength; start += DOWNLOAD_STREAM_CHUNK_BYTES) {
+        const chunk = bytes.subarray(
+          start,
+          Math.min(start + DOWNLOAD_STREAM_CHUNK_BYTES, bytes.byteLength)
+        );
+        const written = await bridgeDownloadRequest(
+          "/download/" + encodeURIComponent(token) + "?offset=" + offset,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: chunk
+          },
+          "bridge 写入下载分块失败"
+        );
+        offset = Number(written.written);
+      }
+    }
+  } else if (expectedSize !== 0) {
+    throw new Error("下载响应缺少可读取的数据流");
+  }
+
+  const completed = await bridgeDownloadRequest(
+    "/download/" + encodeURIComponent(token) + "/complete",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    },
+    "bridge 完成下载失败"
+  );
+  return {
+    ...completed,
+    transport: "extension-stream",
+    sourceHost: source.host,
+    finalHost: new URL(response.url).hostname
+  };
+}
+
+/**
+ * Chrome 原生下载管理器携带目标主机的网页登录 Cookie。下载先进入默认
+ * Downloads/baidu-pan-connector 暂存目录，再由 bridge 校验并原子安装到目标。
+ */
+async function nativeDownloadToBridge(message) {
+  const rawCandidates = Array.isArray(message.dlinks) ? message.dlinks : [message.dlink];
+  const candidates = [];
+  const seen = new Set();
+  for (const rawUrl of rawCandidates) {
+    if (!rawUrl) continue;
+    const source = validateDownloadUrl(rawUrl);
+    if (seen.has(source.url)) continue;
+    seen.add(source.url);
+    candidates.push(source);
+  }
+  const token = String(message.token || "");
+  const expectedSize = Number(message.expectedSize);
+  if (!token) throw new Error("download token 缺失");
+  if (!candidates.length) throw new Error("download dlink 候选为空");
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) {
+    throw new Error("download expectedSize 非法");
+  }
+
+  let downloadId = null;
+  let item = null;
+  let source = null;
+  let headerRuleIds = [];
+  try {
+    // The signed web-UI address normally uses Chrome's browser UA, while the
+    // filemetas compatibility address can require a PCS Netdisk UA. Try both
+    // profiles without changing cookies or exposing their values.
+    const profileErrors = [];
+    for (const profile of DOWNLOAD_HEADER_PROFILES) {
+      headerRuleIds = await installDownloadHeaderRules(candidates, profile);
+      const candidateErrors = [];
+      item = null;
+      for (const candidate of candidates) {
+        source = candidate;
+        downloadId = null;
+        item = null;
+        try {
+          downloadId = await chrome.downloads.download({
+            url: source.url,
+            filename: "baidu-pan-connector/" + token + ".download",
+            conflictAction: "overwrite",
+            saveAs: false
+          });
+          item = await waitForNativeDownload(downloadId);
+          if (!item.filename) throw new Error("Chrome 下载完成但未返回本地文件路径");
+          if (Number(item.fileSize) !== expectedSize) {
+            throw new Error(
+              "Chrome 下载长度不一致 expected=" + expectedSize + " actual=" + item.fileSize
+            );
+          }
+          break;
+        } catch (error) {
+          candidateErrors.push(
+            source.host +
+              " keys=" +
+              source.queryKeys.join(",") +
+              ": " +
+              String(error && (error.message || error))
+          );
+          await removeNativeDownload(downloadId, item && item.state);
+          downloadId = null;
+          item = null;
+        }
+      }
+
+      if (!item) {
+        const nativeError = "全部原生 dlink 候选失败 " + candidateErrors.join(" | ");
+        try {
+          const streamed = await streamDownloadToBridge(candidates, token, expectedSize);
+          return { ...streamed, headerProfile: profile.name };
+        } catch (streamError) {
+          const combined =
+            "profile=" +
+            profile.name +
+            " " +
+            nativeError +
+            "；流式回退失败 " +
+            String(streamError && (streamError.message || streamError));
+          profileErrors.push(combined);
+          if (!streamError.retryWithHeaders) throw new Error(combined);
+          continue;
+        }
+      }
+
+      const imported = await fetch(BRIDGE + "/download/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, source: item.filename }),
+        cache: "no-store"
+      });
+      const text = await imported.text();
+      let result = null;
+      try {
+        result = JSON.parse(text);
+      } catch (_) {}
+      if (!imported.ok || !result || !result.ok) {
+        throw new Error(
+          "bridge 导入下载失败 HTTP " +
+            imported.status +
+            " " +
+            ((result && result.error) || text).slice(0, 300)
+        );
+      }
+      await removeNativeDownload(downloadId, item.state);
+      return {
+        ...result,
+        transport: "chrome-native",
+        headerProfile: profile.name,
+        sourceHost: source.host,
+        finalHost: item.finalUrl ? new URL(item.finalUrl).hostname : source.host
+      };
+    }
+    throw new Error("所有下载请求头配置均失败 " + profileErrors.join(" || "));
+  } catch (error) {
+    await removeNativeDownload(downloadId, item && item.state);
+    throw error;
+  } finally {
+    await removeDownloadHeaderRules(headerRuleIds);
+  }
+}
 
 function normalizePack(pack) {
   const auto = !!(pack.auto || pack.auto_execute);
@@ -302,7 +984,47 @@ async function pollPanRpc() {
 setInterval(() => pollPanRpc(), PAN_RPC_MS);
 pollPanRpc();
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "download-context-main-world") {
+    getPageDownloadContextFromMainWorld(sender)
+      .then((result) => sendResponse(result))
+      .catch((error) =>
+        sendResponse({ ok: false, error: String(error && (error.message || error)) })
+      );
+    return true;
+  }
+  if (msg?.type === "download-page-prepare") {
+    preparePageDownloadCapture(msg)
+      .then((result) => sendResponse(result))
+      .catch((error) =>
+        sendResponse({ ok: false, error: String(error && (error.message || error)) })
+      );
+    return true;
+  }
+  if (msg?.type === "download-page-await") {
+    awaitPageDownloadCapture(msg)
+      .then((result) => sendResponse(result))
+      .catch((error) =>
+        sendResponse({ ok: false, error: String(error && (error.message || error)) })
+      );
+    return true;
+  }
+  if (msg?.type === "download-page-cancel") {
+    cancelPageDownloadCapture(msg.captureId)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: String(error && (error.message || error)) })
+      );
+    return true;
+  }
+  if (msg?.type === "download-native") {
+    nativeDownloadToBridge(msg)
+      .then((result) => sendResponse(result))
+      .catch((error) =>
+        sendResponse({ ok: false, error: String(error && (error.message || error)) })
+      );
+    return true;
+  }
   if (msg?.type === "poll-now") {
     pollBridge({ force: !!msg.force }).then((r) => sendResponse(r));
     return true;

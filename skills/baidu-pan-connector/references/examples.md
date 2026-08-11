@@ -140,3 +140,30 @@ AI: [check_install]
 ```
 
 扩展需 **0.5.0+**（含 `upload` op）。改代码后请在 `chrome://extensions` 点重新加载。
+
+---
+
+## 下载网盘文件
+
+```
+用户: 把 /inbox/a.pdf 下载到 D:\docs
+AI: [check_install]
+    [exists /inbox/a.pdf]
+    [python $S\tools\pan_query.py download "/inbox/a.pdf" --dest "D:\docs"]
+    已下载 → D:\docs\a.pdf；大小与网盘元数据一致，MD5 可用时亦已核验。
+```
+
+任务包：
+
+```json
+{
+  "op": "download",
+  "path": "/inbox/a.pdf",
+  "dest": "D:\\docs",
+  "newname": "a.pdf",
+  "ondup": "fail",
+  "risk": "low"
+}
+```
+
+若目标文件已存在，默认停止。只有用户明确要求覆盖时才使用 `ondup: overwrite`。扩展需 **0.7.0+**；改代码后请在 `chrome://extensions` 重新加载，并刷新已打开的网盘页签。
