@@ -242,27 +242,34 @@ def import_native_download(token: str, source_path: str) -> dict[str, Any]:
     # Chrome resolves the suggested filename against the configured download
     # root, which need not be the conventional Downloads directory. A server
     # Content-Disposition header can also override the suggested basename. The
-    # preferred binding is therefore the unguessable transfer token; when
-    # Chrome replaces that name, require a fresh file plus the exact MD5 from
-    # Baidu metadata before accepting it for import.
+    # preferred binding is therefore the unguessable transfer token. When
+    # Chrome replaces that name, bind the file to this short-lived registration
+    # by freshness and exact length as well. If Baidu supplied a usable MD5,
+    # complete_download() additionally verifies it before the atomic replace.
+    # Some current Pan list responses deliberately contain a non-hex character
+    # in the 32-character checksum field, so requiring a usable remote MD5 here
+    # would reject an otherwise isolated Chrome download before it can be
+    # hashed locally.
     token_named = source.name == f"{token}.download"
     expected_md5 = str(rec.get("expected_md5") or "").lower()
-    hash_bound = (
-        len(expected_md5) == 32
-        and all(char in "0123456789abcdef" for char in expected_md5)
-        and source.stat().st_mtime >= float(rec["created"]) - 2.0
+    source_stat = source.stat()
+    expected_size = rec.get("expected_size")
+    fresh_size_bound = (
+        expected_size is not None
+        and source_stat.st_size == int(expected_size)
+        and source_stat.st_mtime >= float(rec["created"]) - 2.0
+        and source_stat.st_ctime >= float(rec["created"]) - 2.0
     )
-    if not token_named and not hash_bound:
+    if not token_named and not fresh_size_bound:
         raise ValueError(
-            "native download source is neither token-named nor bound by fresh MD5 metadata"
+            "native download source is neither token-named nor bound by fresh size metadata"
         )
 
     with rec["lock"]:
         temp = Path(rec["temp"])
         if int(rec.get("written") or 0) != 0 or not temp.is_file() or temp.stat().st_size != 0:
             raise ValueError("download partial file is not empty before native import")
-        actual_size = source.stat().st_size
-        expected_size = rec.get("expected_size")
+        actual_size = source_stat.st_size
         if expected_size is not None and actual_size != int(expected_size):
             raise ValueError(
                 f"native download size mismatch: expected {expected_size}, got {actual_size}"

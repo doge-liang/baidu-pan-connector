@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import threading
 import urllib.request
@@ -154,14 +155,34 @@ def test_native_download_accepts_content_disposition_name_with_md5(tmp_path: Pat
     assert not source.exists()
 
 
-def test_native_download_rejects_source_name_not_bound_to_token(tmp_path: Path) -> None:
+def test_native_download_accepts_fresh_content_disposition_name_without_md5(
+    tmp_path: Path,
+) -> None:
+    bridge = load_bridge()
+    content = b"data"
+    target = tmp_path / "library" / "book.pdf"
+    registered = bridge.register_download(str(target), expected_size=len(content))
+    source = tmp_path / "server-provided-name.pdf"
+    source.write_bytes(content)
+
+    completed = bridge.import_native_download(registered["token"], str(source))
+
+    assert completed["md5"] == hashlib.md5(content).hexdigest()
+    assert target.read_bytes() == content
+    assert completed["source_removed"] is True
+    assert not source.exists()
+
+
+def test_native_download_rejects_stale_source_not_bound_to_token(tmp_path: Path) -> None:
     bridge = load_bridge()
     target = tmp_path / "book.pdf"
     registered = bridge.register_download(str(target), expected_size=4)
     source = tmp_path / "other.download"
     source.write_bytes(b"data")
+    old_timestamp = source.stat().st_mtime - 10
+    os.utime(source, (old_timestamp, old_timestamp))
 
-    with pytest.raises(ValueError, match="neither token-named nor bound by fresh MD5"):
+    with pytest.raises(ValueError, match="neither token-named nor bound by fresh size"):
         bridge.import_native_download(registered["token"], str(source))
     bridge.abort_download(registered["token"])
 
