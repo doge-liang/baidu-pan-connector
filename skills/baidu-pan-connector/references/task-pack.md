@@ -92,7 +92,7 @@ Flow: bridge hashes file (4MiB blocks) → extension `precreate` → PCS `superf
 
 \* Exactly one of `local` or `dest` is required.
 
-Flow: extension resolves remote metadata and `dlink` → arms an exact-URL, short-lived download capture → the logged-in Pan document triggers the attachment request → Chrome assigns the requested isolated staging filename when possible → bridge imports and checks size and available MD5 → atomic replace → bridge removes the staging file and the extension removes the download-history entry. If Chrome applies a server-provided filename, the bridge additionally requires the file creation and modification times to be newer than the short-lived registration and its length to match exactly; when Baidu supplies a standard 32-character hexadecimal MD5, the bridge also verifies it before the atomic replace. Failed transfers remove staging and partial files.
+Flow for files up to 50 MiB: extension resolves remote metadata and `dlink` → arms an exact-URL, short-lived download capture → the logged-in Pan document triggers the attachment request → Chrome assigns the requested isolated staging filename when possible → bridge imports and checks size and available MD5 → atomic replace → bridge removes the staging file and the extension removes the download-history entry. Larger files fail before web transfer and require the Baidu Netdisk desktop client. The connector does not yet dispatch the proprietary client protocol. The local target must be outside the connector runtime state directory and leave the configured free-space reserve after accounting for the expected file size. Failed transfers remove staging and partial files.
 
 ## Minimal examples
 

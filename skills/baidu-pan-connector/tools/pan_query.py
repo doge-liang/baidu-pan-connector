@@ -15,12 +15,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from runtime_paths import runtime_root
+
 BRIDGE = "http://127.0.0.1:27865"
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def get(url: str, timeout: float = 120) -> dict:
@@ -157,13 +168,26 @@ def main() -> None:
         if not local_target.is_absolute():
             print(f"download local target must be absolute: {local_target}", file=sys.stderr)
             sys.exit(2)
+        resolved_target = local_target.resolve()
+        allow_state_downloads = os.environ.get("BAIDU_PAN_ALLOW_STATE_DOWNLOADS", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not allow_state_downloads and path_is_within(resolved_target, runtime_root().resolve()):
+            print(
+                "download local target must be outside connector runtime state; "
+                "choose an explicit data directory on a drive with sufficient capacity",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         timeout = args.timeout or 3600
         out = post(
             f"{args.bridge}/pan/rpc",
             {
                 "op": "download",
                 "path": remote,
-                "local": str(local_target.resolve()),
+                "local": str(resolved_target),
                 "wait": True,
                 "timeout": timeout,
                 "ondup": args.ondup,

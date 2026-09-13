@@ -3,6 +3,11 @@
   window.__bptLoaded = true;
 
   const BRIDGE = "http://127.0.0.1:27865";
+  const WEB_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+  const MAX_CONSECUTIVE_AUTO_FAILURES = 3;
+  const ERROR_TEXT_MAX_CHARS = 800;
+  let persistInFlight = null;
+  let persistDirty = false;
   const state = {
     packs: {},
     activePackId: null,
@@ -23,6 +28,14 @@
     // connector：正在 auto 执行的 pack id，防重入
     autoRunningId: null
   };
+
+  function compactError(value, maxChars = ERROR_TEXT_MAX_CHARS) {
+    const text = String((value && (value.message || value)) || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text.length <= maxChars) return text;
+    return text.slice(0, Math.max(0, maxChars - 20)) + " …[diagnostic truncated]";
+  }
 
   // —— 网盘 API（同源，依赖页面登录态）——
 
@@ -727,7 +740,7 @@
           "页面下载捕获未返回结果"
         );
       } catch (error) {
-        errors.push(String(error && (error.message || error)));
+        errors.push(compactError(error, 240));
       } finally {
         if (removeFrame) removeFrame();
         if (captureId) {
@@ -740,7 +753,7 @@
         }
       }
     }
-    throw new Error("全部页面上下文 dlink 候选失败 " + errors.join(" | "));
+    throw new Error(compactError("全部页面上下文 dlink 候选失败 " + errors.join(" | ")));
   }
 
   async function nativeDownloadViaBackground(dlinks, registration, meta) {
@@ -748,7 +761,7 @@
     try {
       return await pageContextDownloadViaBackground(dlinks, registration, meta);
     } catch (error) {
-      pageError = String(error && (error.message || error));
+      pageError = compactError(error, 300);
     }
     try {
       return await sendDownloadMessage(
@@ -765,7 +778,7 @@
         "页面上下文下载失败 " +
           pageError +
           "；扩展下载回退失败 " +
-          String(error && (error.message || error))
+          compactError(error, 300)
       );
     }
   }
@@ -810,6 +823,12 @@
     const ondup = String(task.ondup || "fail").toLowerCase();
     if (ondup !== "fail" && ondup !== "overwrite") {
       throw new Error("download ondup 仅支持 fail 或 overwrite");
+    }
+    const expectedSize = Number(meta.size) || 0;
+    if (expectedSize > WEB_DOWNLOAD_MAX_BYTES) {
+      throw new Error(
+        "网页下载安全上限为 50 MiB；已停止扩展下载，避免网页限制触发持续重试。请改用百度网盘客户端"
+      );
     }
 
     let registration = null;
@@ -1205,7 +1224,8 @@
   // —— UI ——
 
   function log(msg) {
-    const line = "[" + new Date().toLocaleTimeString() + "] " + msg;
+    const line =
+      "[" + new Date().toLocaleTimeString() + "] " + compactError(msg, ERROR_TEXT_MAX_CHARS);
     state.log.push(line);
     if (state.log.length > 200) state.log.shift();
     const el = document.getElementById("bpt-log");
@@ -1269,27 +1289,42 @@
     return state.packs[state.activePackId] || null;
   }
 
-  async function persist() {
+  function persist() {
+    persistDirty = true;
     state.ignoreStorageReload = true;
-    try {
-      await chrome.storage.local.set({
-        packs: state.packs,
-        activePackId: state.activePackId
-      });
-    } catch (error) {
-      if (isContextInvalidatedError(error)) {
-        stopForInvalidatedContext(error);
-        return;
+    if (persistInFlight) return persistInFlight;
+    let current = null;
+    current = (async () => {
+      try {
+        // Coalesce bursts of status changes into at most one follow-up write.
+        // This avoids multiple concurrent full-pack serializations in Chrome.
+        do {
+          persistDirty = false;
+          await chrome.storage.local.set({
+            packs: state.packs,
+            activePackId: state.activePackId
+          });
+        } while (persistDirty && !state.contextInvalidated);
+      } catch (error) {
+        if (isContextInvalidatedError(error)) {
+          stopForInvalidatedContext(error);
+          return false;
+        }
+        log("状态持久化失败: " + compactError(error));
+        return false;
+      } finally {
+        if (persistInFlight === current) persistInFlight = null;
+        // 执行中保持屏蔽，避免 onChanged 用旧快照冲掉 done
+        if (!state.running) {
+          setTimeout(() => {
+            if (!state.running && !persistInFlight) state.ignoreStorageReload = false;
+          }, 100);
+        }
       }
-      throw error;
-    } finally {
-      // 执行中保持屏蔽，避免 50ms 后 onChanged 用旧快照冲掉 done
-      if (!state.running) {
-        setTimeout(() => {
-          if (!state.running) state.ignoreStorageReload = false;
-        }, 100);
-      }
-    }
+      return true;
+    })();
+    persistInFlight = current;
+    return current;
   }
 
   async function loadState() {
@@ -1312,7 +1347,11 @@
     const t = pack.tasks.find((x) => x.id === taskId);
     if (!t) return;
     t.status = status;
-    if (result !== undefined) t.result = result;
+    if (result !== undefined) {
+      t.result = result && typeof result === "object" ? { ...result } : result;
+      if (t.result && t.result.error) t.result.error = compactError(t.result.error);
+      if (t.result && t.result.reason) t.result.reason = compactError(t.result.reason, 400);
+    }
     persist();
     render();
   }
@@ -1334,6 +1373,21 @@
     return counts;
   }
 
+  function rejectRemainingQueue(queue, startIndex, reason) {
+    let rejected = 0;
+    for (let index = startIndex; index < queue.length; index++) {
+      const task = queue[index];
+      if (task.status !== "approved") continue;
+      setTaskStatus(task.id, "rejected", {
+        skipped: true,
+        error: compactError(reason),
+        reason: "自动批次已熔断，未再发起网络或磁盘操作"
+      });
+      rejected++;
+    }
+    return rejected;
+  }
+
   function reportRunToBridge(pack, status, extra) {
     if (!pack || !pack.id) return Promise.resolve();
     const tasks = (pack.tasks || []).map((t) => ({
@@ -1341,9 +1395,9 @@
       op: t.op,
       path: t.path,
       status: t.status,
-      error: t.result && t.result.error,
+      error: t.result && compactError(t.result.error),
       skipped: !!(t.result && t.result.skipped),
-      reason: t.result && t.result.reason,
+      reason: t.result && compactError(t.result.reason, 400),
       result: t.result || null
     }));
     const body = JSON.stringify({
@@ -1352,9 +1406,9 @@
       counts: countPackStatuses(pack),
       tasks,
       push_seq: pack.push_seq,
-      log_tail: state.log.slice(-40),
-      error: extra && extra.error,
-      ...(extra || {})
+      log_tail: state.log.slice(-20),
+      ...(extra || {}),
+      error: extra && compactError(extra.error)
     });
     return bridgeFetch("/run/result", "POST", body).then((resp) => {
       if (!resp.ok) log("回写 /run/result 失败: " + (resp.error || ""));
@@ -1409,6 +1463,9 @@
     const completedThisRun = new Set(
       pack.tasks.filter((x) => x.status === "done").map((x) => x.id)
     );
+    let processedThisRun = 0;
+    let consecutiveFailures = 0;
+    let circuitReason = "";
     try {
       getBdstoken();
     } catch (e) {
@@ -1421,7 +1478,8 @@
       render();
       return { ok: false, error: String(e.message || e) };
     }
-    for (const t of queue) {
+    for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+      const t = queue[queueIndex];
       const livePack = state.packs[pack.id] || pack;
       if (t.requires && t.requires.length) {
         const missing = [];
@@ -1436,6 +1494,15 @@
         if (missing.length) {
           log("跳过 " + t.id + "：依赖未完成 " + missing.join(", "));
           setTaskStatus(t.id, "failed", { error: "依赖未完成: " + missing.join(", ") });
+          processedThisRun++;
+          consecutiveFailures++;
+          if (auto && consecutiveFailures >= MAX_CONSECUTIVE_AUTO_FAILURES) {
+            circuitReason =
+              "连续 " + consecutiveFailures + " 个任务失败，自动批次已触发安全熔断";
+            rejectRemainingQueue(queue, queueIndex + 1, circuitReason);
+            log(circuitReason);
+            break;
+          }
           continue;
         }
       }
@@ -1447,11 +1514,18 @@
         if (r && r.ok === false) {
           setTaskStatus(t.id, "failed", r);
           log("失败 " + t.id + "：" + (r.error || "ok=false"));
-          if (t.risk === "high" || t.op === "delete" || t.op === "copy-batch") {
-            log("关键步骤失败，中止后续执行");
+          consecutiveFailures++;
+          const critical = t.risk === "high" || t.op === "delete" || t.op === "copy-batch";
+          if (critical || (auto && consecutiveFailures >= MAX_CONSECUTIVE_AUTO_FAILURES)) {
+            circuitReason = critical
+              ? "关键步骤失败，自动批次已中止"
+              : "连续 " + consecutiveFailures + " 个任务失败，自动批次已触发安全熔断";
+            rejectRemainingQueue(queue, queueIndex + 1, circuitReason);
+            log(circuitReason);
             break;
           }
         } else {
+          consecutiveFailures = 0;
           completedThisRun.add(t.id);
           setTaskStatus(t.id, "done", r);
           log(
@@ -1462,15 +1536,24 @@
           );
         }
       } catch (e) {
-        setTaskStatus(t.id, "failed", { error: String(e.message || e) });
-        log("失败 " + t.id + "：" + (e.message || e));
-        if (t.risk === "high" || t.op === "delete" || t.op === "copy-batch") {
-          log("关键步骤失败，中止后续执行");
+        const taskError = compactError(e);
+        setTaskStatus(t.id, "failed", { error: taskError });
+        log("失败 " + t.id + "：" + taskError);
+        consecutiveFailures++;
+        const critical = t.risk === "high" || t.op === "delete" || t.op === "copy-batch";
+        if (critical || (auto && consecutiveFailures >= MAX_CONSECUTIVE_AUTO_FAILURES)) {
+          circuitReason = critical
+            ? "关键步骤失败，自动批次已中止"
+            : "连续 " + consecutiveFailures + " 个任务失败，自动批次已触发安全熔断";
+          rejectRemainingQueue(queue, queueIndex + 1, circuitReason);
+          log(circuitReason);
           break;
         }
       }
+      processedThisRun++;
       // auto 模式每隔几步回写进度
-      if (auto && completedThisRun.size % 3 === 0) {
+      if (auto && processedThisRun % 3 === 0) {
+        await persist();
         await reportRunToBridge(state.packs[pack.id] || pack, "running");
       }
       await sleep(auto ? 250 : 400);
@@ -1480,6 +1563,7 @@
     state.autoRunningId = null;
     state.currentTaskId = null;
     const finalPack = state.packs[pack.id] || pack;
+    await persist();
     const counts = countPackStatuses(finalPack);
     let finalStatus = "done";
     if (counts.failed > 0 && counts.done === 0) finalStatus = "failed";
@@ -1494,9 +1578,9 @@
         " failed=" +
         counts.failed
     );
-    await reportRunToBridge(finalPack, finalStatus);
+    await reportRunToBridge(finalPack, finalStatus, circuitReason ? { error: circuitReason } : null);
     render();
-    return { ok: counts.failed === 0, status: finalStatus, counts };
+    return { ok: counts.failed === 0 && counts.rejected === 0, status: finalStatus, counts };
   }
 
   async function handleAutoRunPack(packId) {
@@ -1526,7 +1610,7 @@
           t.status = "approved";
         }
       }
-      persist();
+      await persist();
     }
     const approved = pack.tasks.filter((t) => t.status === "approved").length;
     if (!approved) {

@@ -2,11 +2,17 @@
 // CLI 主控：python -B tools/pan_task.py push <runtime-task.json> --auto --wait
 
 const BRIDGE = "http://127.0.0.1:27865";
-const POLL_MS = 2500;
+// Keep the connector responsive without continuously reparsing and rewriting the
+// complete task history. The previous 2.5 s full-history loop could keep a Pan
+// tab, the service worker, and Chrome storage busy for hours after a failed batch.
+const POLL_MS = 10000;
 const DOWNLOAD_POLL_MS = 500;
 const DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const PAGE_DOWNLOAD_CAPTURE_TIMEOUT_MS = 20 * 1000;
 const DOWNLOAD_STREAM_CHUNK_BYTES = 4 * 1024 * 1024;
+const WEB_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const JSON_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+const ERROR_TEXT_MAX_CHARS = 800;
 const DOWNLOAD_HEADER_RULE_IDS = Array.from({ length: 16 }, (_, index) => 9700 + index);
 const DOWNLOAD_HEADER_DOMAINS = [
   "pcs.baidu.com",
@@ -41,6 +47,12 @@ const DOWNLOAD_HEADER_PROFILES = [
   }
 ];
 const pageDownloadCaptures = new Map();
+
+function compactError(value, maxChars = ERROR_TEXT_MAX_CHARS) {
+  const text = String(value && (value.message || value) || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxChars) return text;
+  return text.slice(0, Math.max(0, maxChars - 20)) + " …[diagnostic truncated]";
+}
 
 async function resolvePageDownloadContextInMainWorld() {
   function firstValue(sources, names) {
@@ -206,7 +218,7 @@ function wait(ms) {
 
 async function installDownloadHeaderRules(candidates, profile) {
   if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateSessionRules) {
-    throw new Error("Chrome 缺少 declarativeNetRequest，需重新加载 0.7.14+ 扩展");
+    throw new Error("Chrome 缺少 declarativeNetRequest，需重新加载 0.7.15+ 扩展");
   }
   // Each redirect is a new request. Keep the rules on the complete, explicitly
   // permitted Baidu data-domain families so CDN redirects retain the headers.
@@ -583,6 +595,11 @@ async function nativeDownloadToBridge(message) {
   if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) {
     throw new Error("download expectedSize 非法");
   }
+  if (expectedSize > WEB_DOWNLOAD_MAX_BYTES) {
+    throw new Error(
+      "网页下载安全上限为 50 MiB；大文件不得由扩展反复尝试，请改用百度网盘客户端"
+    );
+  }
 
   let downloadId = null;
   let item = null;
@@ -622,7 +639,7 @@ async function nativeDownloadToBridge(message) {
               " keys=" +
               source.queryKeys.join(",") +
               ": " +
-              String(error && (error.message || error))
+              compactError(error, 240)
           );
           await removeNativeDownload(downloadId, item && item.state);
           downloadId = null;
@@ -642,7 +659,7 @@ async function nativeDownloadToBridge(message) {
             " " +
             nativeError +
             "；流式回退失败 " +
-            String(streamError && (streamError.message || streamError));
+            compactError(streamError, 300);
           profileErrors.push(combined);
           if (!streamError.retryWithHeaders) throw new Error(combined);
           continue;
@@ -677,7 +694,7 @@ async function nativeDownloadToBridge(message) {
         finalHost: item.finalUrl ? new URL(item.finalUrl).hostname : source.host
       };
     }
-    throw new Error("所有下载请求头配置均失败 " + profileErrors.join(" || "));
+    throw new Error(compactError("所有下载请求头配置均失败 " + profileErrors.join(" || ")));
   } catch (error) {
     await removeNativeDownload(downloadId, item && item.state);
     throw error;
@@ -723,10 +740,18 @@ function normalizePack(pack) {
   };
 }
 
-async function fetchJson(url) {
+async function fetchJson(url, maxBytes = JSON_RESPONSE_MAX_BYTES) {
   const r = await fetch(url, { cache: "no-store" });
   if (!r.ok) throw new Error("HTTP " + r.status + " " + url);
-  return r.json();
+  const declared = Number(r.headers.get("Content-Length") || 0);
+  if (declared > maxBytes) {
+    throw new Error("bridge JSON 响应超过安全上限: " + declared + " bytes");
+  }
+  const text = await r.text();
+  if (text.length > maxBytes) {
+    throw new Error("bridge JSON 响应超过安全上限: >" + maxBytes + " chars");
+  }
+  return JSON.parse(text);
 }
 
 async function notifyTabs(msg) {
@@ -768,7 +793,10 @@ async function notifyOneTab(msg) {
 /**
  * @param {{ force?: boolean }} opts force=true 时用桥上内容覆盖本地同 id 包
  */
-async function pollBridge(opts = {}) {
+let historyHydrated = false;
+let pollBridgeInFlight = null;
+
+async function pollBridgeOnce(opts = {}) {
   const force = !!opts.force;
   const result = {
     ok: false,
@@ -794,12 +822,16 @@ async function pollBridge(opts = {}) {
       return result;
     }
     result.pendingCount = health.pending || 0;
+    result.historyCount = health.history || 0;
 
     const pendingData = await fetchJson(BRIDGE + "/pending");
     let historyData = { packs: [] };
-    try {
-      historyData = await fetchJson(BRIDGE + "/history");
-    } catch (_) {}
+    if (force || !historyHydrated) {
+      try {
+        historyData = await fetchJson(BRIDGE + "/history?limit=50");
+        historyHydrated = true;
+      } catch (_) {}
+    }
 
     const byId = new Map();
     for (const p of historyData.packs || []) {
@@ -808,7 +840,7 @@ async function pollBridge(opts = {}) {
     for (const p of pendingData.packs || []) {
       if (p && p.id) byId.set(p.id, p);
     }
-    result.historyCount = byId.size;
+    if (!result.historyCount) result.historyCount = byId.size;
 
     const store = await chrome.storage.local.get([
       "packs",
@@ -920,18 +952,33 @@ async function pollBridge(opts = {}) {
       result.note = "强制重载已导入: " + result.imported.join(", ");
     }
   } catch (e) {
-    result.error = String(e.message || e);
+    result.error = compactError(e);
   }
 
   await chrome.storage.local.set({ lastPoll: { ...result, at: Date.now() } });
   return result;
 }
 
+async function pollBridge(opts = {}) {
+  if (pollBridgeInFlight) {
+    if (!opts.force) return pollBridgeInFlight;
+    await pollBridgeInFlight.catch(() => {});
+  }
+  const current = pollBridgeOnce(opts);
+  pollBridgeInFlight = current;
+  try {
+    return await current;
+  } finally {
+    if (pollBridgeInFlight === current) pollBridgeInFlight = null;
+  }
+}
+
 setInterval(() => pollBridge(), POLL_MS);
 pollBridge();
 
 // 实况查询：bridge 排队 → pan 页 content script
-const PAN_RPC_MS = 1500;
+const PAN_RPC_MS = 2500;
+let panRpcInFlight = false;
 
 async function sendPanRpcToAnyTab(payload) {
   const tabs = await chrome.tabs.query({
@@ -956,6 +1003,8 @@ async function sendPanRpcToAnyTab(payload) {
 }
 
 async function pollPanRpc() {
+  if (panRpcInFlight) return;
+  panRpcInFlight = true;
   try {
     const data = await fetchJson(BRIDGE + "/pan/rpc/pending");
     const reqs = data.requests || [];
@@ -978,7 +1027,10 @@ async function pollPanRpc() {
         })
       }).catch(() => {});
     }
-  } catch (_) {}
+  } catch (_) {
+  } finally {
+    panRpcInFlight = false;
+  }
 }
 
 setInterval(() => pollPanRpc(), PAN_RPC_MS);

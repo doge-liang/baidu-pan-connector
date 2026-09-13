@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+from types import SimpleNamespace
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -95,6 +96,36 @@ def test_download_requires_an_absolute_local_target(tmp_path: Path) -> None:
     bridge = load_bridge()
     with pytest.raises(ValueError, match="must be absolute"):
         bridge.register_download("relative/file.bin", expected_size=0)
+
+
+def test_download_rejects_connector_runtime_state_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge = load_bridge()
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(bridge, "_STATE_DIR", state_root)
+    monkeypatch.setattr(bridge, "_ALLOW_STATE_DOWNLOADS", False)
+
+    with pytest.raises(ValueError, match="must not be inside connector runtime state"):
+        bridge.register_download(str(state_root / "workspace" / "large.bin"), expected_size=0)
+
+    assert not (state_root / "workspace").exists()
+
+
+def test_download_reserves_free_space_before_creating_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge = load_bridge()
+    target = tmp_path / "download.bin"
+    monkeypatch.setattr(bridge, "_STATE_DIR", tmp_path / "other-state")
+    monkeypatch.setattr(bridge, "_DOWNLOAD_MIN_FREE_BYTES", 100)
+    monkeypatch.setattr(bridge.shutil, "disk_usage", lambda _: SimpleNamespace(free=109))
+
+    with pytest.raises(OSError, match="insufficient free space"):
+        bridge.register_download(str(target), expected_size=10)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.part"))
 
 
 def test_native_download_is_imported_from_connector_staging(tmp_path: Path) -> None:

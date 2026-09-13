@@ -22,6 +22,13 @@ D:\project\baidu-pan-connector\
 Override the runtime root with the absolute path environment variable
 `BAIDU_PAN_CONNECTOR_STATE_DIR` when required.
 
+The runtime root stores only connector state, task packs, caches, and logs. Downloads are
+rejected when their target is inside this directory. Choose an explicit data directory,
+preferably on a non-system drive. The bridge also reserves 2 GiB beyond the expected file
+size by default; override this reserve with `BAIDU_PAN_DOWNLOAD_MIN_FREE_BYTES` only after
+checking the target volume. `BAIDU_PAN_ALLOW_STATE_DOWNLOADS=1` disables the runtime-target
+guard and is intended only for controlled tests, not normal use.
+
 ## Start and verify
 
 ```powershell

@@ -30,6 +30,7 @@ import json
 import mimetypes
 import os
 import secrets
+import shutil
 import subprocess
 import threading
 import time
@@ -108,6 +109,29 @@ _DOWNLOAD_TTL_SEC = 24 * 3600
 _DOWNLOAD_CHUNK_MAX_BYTES = int(
     os.environ.get("BAIDU_PAN_DOWNLOAD_CHUNK_MAX_BYTES") or (8 * 1024**2)
 )
+_DOWNLOAD_MIN_FREE_BYTES = int(
+    os.environ.get("BAIDU_PAN_DOWNLOAD_MIN_FREE_BYTES") or (2 * 1024**3)
+)
+_ALLOW_STATE_DOWNLOADS = os.environ.get("BAIDU_PAN_ALLOW_STATE_DOWNLOADS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _disk_anchor(path: Path) -> Path:
+    current = path
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return current
 
 
 def _purge_downloads_unlocked() -> None:
@@ -151,6 +175,21 @@ def register_download(
         raise FileExistsError(f"local target already exists: {target}")
     if expected_size is not None and int(expected_size) < 0:
         raise ValueError("download size must be non-negative")
+    state_root = _STATE_DIR.resolve(strict=False)
+    if not _ALLOW_STATE_DOWNLOADS and _path_is_within(target, state_root):
+        raise ValueError(
+            "download target must not be inside connector runtime state; "
+            "choose an explicit data directory on a drive with sufficient capacity"
+        )
+
+    expected_bytes = int(expected_size or 0)
+    free_bytes = shutil.disk_usage(_disk_anchor(target.parent)).free
+    required_free = expected_bytes + _DOWNLOAD_MIN_FREE_BYTES
+    if free_bytes < required_free:
+        raise OSError(
+            "insufficient free space for verified download: "
+            f"need at least {required_free} bytes, available {free_bytes} bytes"
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(24)
@@ -523,9 +562,15 @@ def _save_state_unlocked() -> None:
         "pending_ids": list(_pending.keys()),
         "history": list(_history.values()),
     }
-    _STATE_FILE.write_text(
-        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-    )
+    # An interrupted machine or bridge process must not leave a half-written
+    # state file. The temporary file lives on the same volume for atomic replace.
+    temp = _STATE_FILE.with_suffix(_STATE_FILE.suffix + ".tmp")
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    with temp.open("wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, _STATE_FILE)
 
 
 def _load_state() -> None:
@@ -804,6 +849,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/health"):
             with _lock:
                 n = len(_pending)
+                history_n = len(_history)
                 idx = dict(_index_status)
                 runs_n = len(_runs)
                 auto_running = sum(
@@ -816,6 +862,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "pending": n,
+                    "history": history_n,
                     "runs": runs_n,
                     "auto_running": auto_running,
                     "vault": str(_VAULT) if _VAULT is not None else None,
@@ -854,8 +901,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"packs": packs})
             return
         if path == "/history":
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = int((qs.get("limit") or ["0"])[0])
+            except ValueError:
+                self._json(400, {"error": "history limit must be an integer"})
+                return
+            if limit < 0 or limit > 500:
+                self._json(400, {"error": "history limit must be between 0 and 500"})
+                return
             with _lock:
                 packs = list(_history.values())
+                if limit:
+                    packs = packs[-limit:]
             self._json(200, {"packs": packs})
             return
         if path == "/index/status":

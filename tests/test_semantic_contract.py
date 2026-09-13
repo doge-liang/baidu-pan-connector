@@ -13,6 +13,7 @@ def test_three_source_semantic_contract_is_preserved() -> None:
 
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     background = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    pan_query = (SKILL / "tools" / "pan_query.py").read_text(encoding="utf-8")
 
     # Core task operations originated in the Knowledge extension copy.
     for operation in (
@@ -84,6 +85,19 @@ def test_three_source_semantic_contract_is_preserved() -> None:
     assert "Extension context invalidated" in content
     assert "stopForInvalidatedContext" in content
     assert "chrome.runtime.getManifest().version" in content
+
+    # Resource safety: web-large files fail before transfer, failed auto batches
+    # are terminally halted, and full task state writes are coalesced.
+    assert "WEB_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024" in content
+    assert "MAX_CONSECUTIVE_AUTO_FAILURES = 3" in content
+    assert "rejectRemainingQueue" in content
+    assert "persistInFlight" in content
+    assert "persistDirty" in content
+    assert "WEB_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024" in background
+    assert "historyHydrated" in background
+    assert '"/history?limit=50"' in background
+    assert "pollBridgeInFlight" in background
+    assert "path_is_within(resolved_target, runtime_root().resolve())" in pan_query
 
 
 def test_connector_ui_and_permissions_remain_minimal() -> None:
