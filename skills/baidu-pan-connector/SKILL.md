@@ -3,17 +3,18 @@ name: baidu-pan-connector
 description: >-
   Operate Baidu Netdisk (百度网盘) via the bundled Baidu Pan Agent Connector:
   Chrome extension + local bridge CLI — list/exists/search, mkdir/move/rename/copy/delete,
+  upload/download,
   batch task packs, optional crawl. Includes install check.
   TRIGGER: 百度网盘, 网盘, pan.baidu, baidu-pan, bridge, 任务包, connector, 扩展操作网盘,
   安装检查, check_install; pan file ops through extension+bridge.
   Context continuity: if this conversation is already doing pan ops, follow-ups need not
   re-mention 网盘.
   Prefer this over baidu-drive for full-tree pan.baidu.com via connector (not bdpan sandbox).
-  DO NOT TRIGGER: bdpan-only /apps/bdpan memory-backup (use baidu-drive); local download,
-  share-link transfer, or OpenAPI-only flows (use baidu-drive or web UI); non-pan tasks;
+  DO NOT TRIGGER: bdpan-only /apps/bdpan memory-backup (use baidu-drive);
+  share-link transfer or OpenAPI-only flows (use baidu-drive or web UI); non-pan tasks;
   文库 PPT (baidu-wenku-aippt).
-  Supports local→pan upload via bridge file register + extension web API.
-  Transfer/share still use baidu-drive or web UI.
+  Supports local→pan upload and pan→local verified streaming download via the bridge.
+  Share-link transfer/share creation still use baidu-drive or web UI.
 ---
 
 # Baidu Pan Agent Connector
@@ -37,6 +38,7 @@ the transport here is **extension + bridge**, not `bdpan`. See [SOURCES.md](./SO
 | `tasks/` | Non-sensitive task-pack examples only |
 | `scripts/check_install.py` | Install / readiness check |
 | `scripts/start_connector.ps1` | Start the bridge with external runtime state |
+| `scripts/sync_install.py` | Verify source-link or controlled-copy consistency |
 | `references/install.md` | Human install guide |
 
 ```powershell
@@ -54,10 +56,10 @@ $TASKS = Join-Path $RUNTIME "tasks"
 Execute pan ops only when:
 
 1. User intent involves Baidu Netdisk / connector / bridge / task packs, **or** this chat is already mid pan-ops (continuity), and
-2. Intent is concrete enough (list / search / move / mkdir / delete / **upload** / push pack / crawl / install check).
+2. Intent is concrete enough (list / search / move / mkdir / delete / **upload / download** / push pack / crawl / install check).
 
 Do **not** run connector commands for unrelated tasks.
-Transfer / share / download-to-local: use **baidu-drive** or the web UI (not this connector).
+Share-link transfer / share creation: use **baidu-drive** or the web UI (not this connector).
 
 ---
 
@@ -79,12 +81,12 @@ Adapted from baidu-drive’s risk tiers, mapped to connector ops:
 | Level | Operations | Policy |
 |---|---|---|
 | **High (must confirm)** | `delete`; bulk move/rename (>20 items or unclear scope); crawl | List paths/counts; wait for explicit OK |
-| **Medium (confirm if ambiguous)** | move, rename, copy, upload when path unclear | Confirm target; if paths verified, run |
+| **Medium (confirm if ambiguous)** | move, rename, copy, upload/download when path unclear; download overwrite | Confirm target; if paths verified, run |
 | **Low (run)** | list, exists, search, mkdir, health, check_install | No confirm |
 
 Extra rules (from baidu-drive):
 
-- Vague intent (“处理一下文件”) → ask upload vs organize vs delete.
+- Vague intent (“处理一下文件”) → ask upload vs download vs organize vs delete.
 - Ordinals / pronouns (“第2个”, “它”) without a bound list → clarify.
 - Cancel language → abort immediately.
 
@@ -97,6 +99,7 @@ Ordered checklist (same idea as baidu-drive’s 安装检查 → 登录检查):
 1. **Package + bridge + tab**
 
 ```powershell
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 python -B "$S\scripts\check_install.py"
 ```
 
@@ -136,10 +139,11 @@ Install copy-paste for users: [references/install.md](./references/install.md).
 | Search | `python -B "$TOOLS\pan_query.py" search "key" --dir "/" --max 50` |
 | Writes | Task pack in `$TASKS\` → `pan_task.py push … --auto --wait` |
 | **Upload local file** | `pan_query.py upload <local> --dest /remote/dir` or pack `op: upload` |
+| **Download remote file** | `pan_query.py download <remote> --dest <local-dir>` or pack `op: download` |
 | Crawl | `pan_query.py crawl-start` (heavy) |
-| Download / transfer / share | Not in connector → baidu-drive or web UI |
+| Share-link transfer / share | Not in connector → baidu-drive or web UI |
 
-Pack `op`: `mkdir` | `copy` | `copy-batch` | `move` | `rename` | `delete` | **`upload`** | `normalize-dir`.
+Pack `op`: `mkdir` | `copy` | `copy-batch` | `move` | `rename` | `delete` | **`upload`** | **`download`** | `normalize-dir`.
 
 ### Upload (local → pan)
 
@@ -163,6 +167,29 @@ python -B "$TOOLS\pan_task.py" push "$TASKS\my-upload.json" --auto --wait
 
 Mechanism: bridge `POST /localfile/register` (MD5 + 4MiB blocks) → extension precreate / superfile2 / create.
 Max size default 8 GiB (`BAIDU_PAN_UPLOAD_MAX_BYTES`).
+
+### Download (pan → local)
+
+Requires: bridge running, extension **reloaded to 0.7.15+**, pan.baidu.com logged in.
+
+```powershell
+# one-shot: remote file → local directory (keeps remote basename)
+python -B "$TOOLS\pan_query.py" download "/remote/dir/file.pdf" --dest "D:\downloads"
+
+# explicit local filename; overwrite must be explicit
+python -B "$TOOLS\pan_query.py" download "/remote/dir/file.pdf" --local "D:\downloads\renamed.pdf" --ondup overwrite
+
+# task pack
+# { "op":"download", "path":"/remote/dir/file.pdf", "dest":"D:\\downloads", "ondup":"fail" }
+python -B "$TOOLS\pan_task.py" push "$TASKS\my-download.json" --auto --wait --timeout 3600
+```
+
+| `ondup` | Behavior |
+|---|---|
+| `fail` | Stop if the local target exists (default) |
+| `overwrite` | Replace only after the complete temporary file passes verification |
+
+Mechanism: the background service worker uses `chrome.scripting.executeScript` with `world: MAIN` only in the requesting Pan tab. It calls same-origin `/api/gettemplatevariable` for fresh signature inputs and uses the bundled, auditable equivalent transformation; remotely supplied code is never evaluated. For files no larger than 50 MiB, it obtains the current signed `/api/download` dlink and uses the logged-in Pan document, Chrome download manager, or bounded sequential bridge streaming. All successful routes end in a same-directory partial target; the bridge verifies size and available MD5 before atomic replacement. Version 0.7.15 adds a hard safety boundary: files larger than 50 MiB fail before any browser transfer because the web endpoint applies large-file restrictions and repeated retries create sustained browser and disk pressure. Such files require an explicit Baidu Netdisk desktop-client workflow; this connector does not yet dispatch the proprietary client protocol. The bridge rejects destinations inside its runtime state directory by default, reserves at least 2 GiB of free space beyond the expected file size, and atomically saves task state. Automatic batches stop after three consecutive failures and mark unstarted tasks rejected, preventing background polling from restarting the same failed batch. Polling hydrates only the latest 50 history records once per service-worker lifetime. Directory recursion and resume are not supported in 1.7.15; submit explicit file tasks.
 
 ### Verify-before-write (from baidu-drive style)
 
@@ -235,10 +262,11 @@ When reporting to the user (baidu-drive style clarity):
 | Stack | Extension + bridge | `bdpan` CLI |
 | Tree | Full account tree | Often `/apps/bdpan/` |
 | Local upload | Yes (`upload` op / CLI) | Yes |
-| Local download / transfer / share | No | Yes |
+| Local download | Yes (`download` op / CLI) | Yes |
+| Share-link transfer / share | No | Yes |
 | Disk reorganize (mkdir/move/…) | Yes (task packs) | Yes |
 
-Install baidu-drive (if needed for download/transfer/share):
+Install baidu-drive (if needed for share-link transfer/share):
 
 ```bash
 npx skills add https://github.com/baidu-netdisk/bdpan-storage/skills --skill baidu-drive
@@ -248,10 +276,10 @@ npx skills add https://github.com/baidu-netdisk/bdpan-storage/skills --skill bai
 
 ## Extension reload after upgrade
 
-After updating this skill’s `extension/`, open `chrome://extensions` → **Reload** on *Baidu Pan Agent Connector* (need **0.5.0+** for upload). Load path:
+After updating this skill’s `extension/`, open `chrome://extensions` → **Reload** on *Baidu Pan Agent Connector* (need **0.7.15+** for resource-safe polling, persistence coalescing, batch failure circuit breaking, the 50 MiB web-transport boundary, and verified local download). On the development machine, Chrome must load the canonical checkout directly:
 
 ```text
-%USERPROFILE%\.codex\skills\baidu-pan-connector\extension
+D:\project\baidu-pan-connector\skills\baidu-pan-connector\extension
 ```
 
 ---

@@ -1,0 +1,17 @@
+{
+  "schema": "baidu-pan-task-pack/v1",
+  "id": "example-download-edit-paths-first",
+  "title": "Example download — edit remote/local paths before push",
+  "tasks": [
+    {
+      "id": "download-1",
+      "op": "download",
+      "path": "/remote/dir/example.pdf",
+      "dest": "D:\\downloads",
+      "newname": "example.pdf",
+      "ondup": "fail",
+      "risk": "low",
+      "title": "download example.pdf"
+    }
+  ]
+}

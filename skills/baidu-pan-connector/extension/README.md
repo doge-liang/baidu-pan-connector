@@ -12,11 +12,11 @@
 | `manifest.json` 等 | Chrome MV3 扩展（**仅**前端；勿在此目录跑 Python） |
 | `../tools/bridge.py` | `127.0.0.1:27865` 任务桥 + 索引 + 实况 RPC + run 状态 |
 | `../tools/pan_task.py` | **主控 CLI**：push / wait / status |
-| `../tools/pan_query.py` | 实况 list/exists/search / crawl / upload |
+| `../tools/pan_query.py` | 实况 list/exists/search / crawl / upload / download |
 | `%USERPROFILE%/.codex/state/baidu-pan-connector/tasks/*.json` | **私人**任务包工作区，位于源码外 |
 | `store/` | 上架文案、隐私政策、打包脚本 |
 
-版本 **0.6.0+** 使用只读 Connector 界面：三色状态灯、当前任务摘要和 Debug 日志；**0.3.0+** 支持 `--auto` 全自动执行。版本 **0.6.1+** 会在扩展重载使旧页面上下文失效时停止轮询，并提示刷新页面。版本 **0.6.2+** 统一使用独立仓库与外部运行状态目录。
+版本 **0.6.0+** 使用只读 Connector 界面：三色状态灯、当前任务摘要和 Debug 日志；**0.3.0+** 支持 `--auto` 全自动执行。版本 **0.6.1+** 会在扩展重载使旧页面上下文失效时停止轮询，并提示刷新页面。版本 **0.6.2+** 统一使用独立仓库与外部运行状态目录。版本 **0.7.15+** 保留当前网页签名协议和校验后原子落盘，但将网页传输硬限制为 50 MiB；更大的文件在发起浏览器传输前失败，并要求改用百度网盘桌面客户端。该版本还将桥轮询降低为 10 秒、每个 service worker 生命周期只读取一次最近 50 条历史、合并 Chrome storage 写入，并在连续三个任务失败后熔断自动批次。
 
 ## 安装扩展（开发）
 
@@ -73,7 +73,7 @@ python -B "$S\tools\pan_task.py" health
 
 CLI `--auto` 时 bridge 写入 `auto` / `auto_policy` / `push_seq`；扩展按 `push_seq` 覆盖导入并执行。
 
-支持 `op`：`mkdir` / `copy` / `copy-batch` / `move` / `rename` / `delete` / `upload` / `normalize-dir`。
+支持 `op`：`mkdir` / `copy` / `copy-batch` / `move` / `rename` / `delete` / `upload` / `download` / `normalize-dir`。
 
 ## Chrome Web Store
 

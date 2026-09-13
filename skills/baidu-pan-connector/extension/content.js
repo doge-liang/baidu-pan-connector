@@ -3,6 +3,11 @@
   window.__bptLoaded = true;
 
   const BRIDGE = "http://127.0.0.1:27865";
+  const WEB_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+  const MAX_CONSECUTIVE_AUTO_FAILURES = 3;
+  const ERROR_TEXT_MAX_CHARS = 800;
+  let persistInFlight = null;
+  let persistDirty = false;
   const state = {
     packs: {},
     activePackId: null,
@@ -23,6 +28,14 @@
     // connector：正在 auto 执行的 pack id，防重入
     autoRunningId: null
   };
+
+  function compactError(value, maxChars = ERROR_TEXT_MAX_CHARS) {
+    const text = String((value && (value.message || value)) || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text.length <= maxChars) return text;
+    return text.slice(0, Math.max(0, maxChars - 20)) + " …[diagnostic truncated]";
+  }
 
   // —— 网盘 API（同源，依赖页面登录态）——
 
@@ -82,10 +95,102 @@
 
   async function fileMeta(path) {
     const i = path.lastIndexOf("/");
-    const parent = path.slice(0, i);
+    const parent = i <= 0 ? "/" : path.slice(0, i);
     const name = path.slice(i + 1);
     const items = await listDir(parent);
     return items.find((it) => it.server_filename === name || it.path === path) || null;
+  }
+
+  function pageJsonString(html, key) {
+    const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(html || "").match(
+      new RegExp('["\\\']' + escaped + '["\\\']\\s*:\\s*["\\\']([^"\\\']+)["\\\']', "i")
+    );
+    return match ? match[1] : "";
+  }
+
+  function pageJsonInteger(html, key) {
+    const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(html || "").match(
+      new RegExp('["\\\']' + escaped + '["\\\']\\s*:\\s*["\\\']?(\\d+)', "i")
+    );
+    return match ? Number(match[1]) : 0;
+  }
+
+  // Baidu's page computes the short-lived /api/download signature with an
+  // RC4-compatible transform: sign2(sign3, sign1), then binary base64.
+  function panSign2(key, text) {
+    const box = Array.from({ length: 256 }, (_, index) => index);
+    const keyCodes = Array.from({ length: 256 }, (_, index) =>
+      key.charCodeAt(index % key.length)
+    );
+    let j = 0;
+    for (let i = 0; i < 256; i++) {
+      j = (j + box[i] + keyCodes[i]) % 256;
+      [box[i], box[j]] = [box[j], box[i]];
+    }
+    let i = 0;
+    j = 0;
+    let output = "";
+    for (let offset = 0; offset < text.length; offset++) {
+      i = (i + 1) % 256;
+      j = (j + box[i]) % 256;
+      [box[i], box[j]] = [box[j], box[i]];
+      const keyByte = box[(box[i] + box[j]) % 256];
+      output += String.fromCharCode(text.charCodeAt(offset) ^ keyByte);
+    }
+    return output;
+  }
+
+  async function mainWorldPanDownloadContext() {
+    return new Promise((resolve, reject) => {
+      safeRuntimeSendMessage({ type: "download-context-main-world" }, (detail, error) => {
+        if (error) {
+          reject(new Error(error.message || String(error)));
+          return;
+        }
+        const timestamp = Number(detail && detail.timestamp);
+        if (
+          !detail ||
+          !detail.ok ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(String(detail.sign || "")) ||
+          !Number.isSafeInteger(timestamp) ||
+          timestamp <= 0
+        ) {
+          reject(new Error(String(detail.error || "页面主世界签名无效")));
+          return;
+        }
+        resolve({
+          sign: String(detail.sign),
+          timestamp,
+          vip: Number.isFinite(Number(detail.vip)) ? Number(detail.vip) : 0,
+          source: String(detail.source || "main-world")
+        });
+      });
+    });
+  }
+
+  async function getPanDownloadContext() {
+    try {
+      return await mainWorldPanDownloadContext();
+    } catch (_) {}
+    let sign1 = "";
+    let sign3 = "";
+    let timestamp = 0;
+    try {
+      const data = window.yunData || {};
+      sign1 = String(data.sign1 || data.SIGN1 || "");
+      sign3 = String(data.sign3 || data.SIGN3 || "");
+      timestamp = Number(data.timestamp || data.TIMESTAMP || 0);
+    } catch (_) {}
+    const html = document.documentElement.innerHTML;
+    if (!sign1) sign1 = pageJsonString(html, "sign1");
+    if (!sign3) sign3 = pageJsonString(html, "sign3");
+    if (!timestamp) timestamp = pageJsonInteger(html, "timestamp");
+    if (!sign1 || !sign3 || !Number.isSafeInteger(timestamp) || timestamp <= 0) {
+      throw new Error("页面缺少 download sign1/sign3/timestamp，请刷新网盘主页面");
+    }
+    return { sign: btoa(panSign2(sign3, sign1)), timestamp, source: "html-fallback" };
   }
 
   /**
@@ -461,6 +566,295 @@
     };
   }
 
+  function joinLocal(dest, name) {
+    const d = String(dest || "");
+    const n = String(name || "").replace(/^[\\/]+/, "");
+    if (!d) throw new Error("download 需要 local（完整本机路径）或 dest（本机目录）");
+    if (!n) throw new Error("download 缺少本机文件名");
+    if (n === "." || n === ".." || /[\\/]/.test(n)) {
+      throw new Error("download newname 必须是文件名，不能包含目录分隔符");
+    }
+    const trimmed = d.replace(/[\\/]+$/, "");
+    const separator = /^[A-Za-z]:/.test(d) || d.includes("\\") ? "\\" : "/";
+    return trimmed + separator + n;
+  }
+
+  async function panDownloadUrls(remotePath, meta) {
+    const dlinks = [];
+    const seen = new Set();
+    function addDlink(value) {
+      if (!value) return;
+      const normalized = String(value).replace(/&amp;/g, "&");
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      dlinks.push(normalized);
+    }
+    const metadataDlink = meta && meta.dlink;
+    const token = getBdstoken();
+    const common =
+      "&bdstoken=" + encodeURIComponent(token) + "&clienttype=0&app_id=250528&web=1";
+    const fsid = meta && (meta.fs_id != null ? meta.fs_id : meta.fsid);
+    let lastError = "下载接口未返回 dlink";
+
+    // Prefer the same signed endpoint used by the logged-in web UI. Unlike
+    // OpenAPI dlinks, this contract uses the page signature and login session.
+    if (fsid != null) {
+      try {
+        const context = await getPanDownloadContext();
+        log("下载签名上下文 " + context.source);
+        const params = new URLSearchParams();
+        params.set("channel", "chunlei");
+        params.set("clienttype", "0");
+        params.set("web", "1");
+        params.set("app_id", "250528");
+        params.set("bdstoken", token);
+        params.set("fidlist", JSON.stringify([fsid]));
+        params.set("type", "dlink");
+        params.set("vip", String(context.vip || 0));
+        params.set("sign", context.sign);
+        params.set("timestamp", String(context.timestamp));
+        const response = await fetch("/api/download?" + params.toString(), {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+        const result = await response.json();
+        if (!response.ok || Number(result.errno || 0) !== 0) {
+          lastError = "网页下载签名接口失败 errno=" + String(result.errno);
+        } else {
+          const rawEntries = result.dlink || result.list || [];
+          const entries = Array.isArray(rawEntries) ? rawEntries : [rawEntries];
+          for (const entry of entries) addDlink(entry && (entry.dlink || entry));
+        }
+      } catch (error) {
+        lastError = "网页下载签名接口失败 " + String(error && (error.message || error));
+      }
+    }
+
+    // Metadata dlinks are compatibility candidates. Keep them behind the
+    // current signed endpoint so an obsolete list result cannot delay success.
+    addDlink(metadataDlink);
+
+    const urls = [];
+    if (fsid != null) {
+      urls.push(
+        "/api/filemetas?dlink=1&fsids=" + encodeURIComponent(JSON.stringify([fsid])) + common
+      );
+    }
+    urls.push(
+      "/api/filemetas?dlink=1&target=" + encodeURIComponent(JSON.stringify([remotePath])) + common
+    );
+    for (const url of urls) {
+      const response = await fetch(url, { credentials: "same-origin", cache: "no-store" });
+      const text = await response.text();
+      let result;
+      try {
+        result = JSON.parse(text);
+      } catch (_) {
+        lastError = "filemetas 返回非 JSON，HTTP " + response.status;
+        continue;
+      }
+      if (!response.ok || (result.errno != null && Number(result.errno) !== 0)) {
+        lastError = "获取下载地址失败 " + JSON.stringify(result).slice(0, 400);
+        continue;
+      }
+      const entries = result.info || result.list || [];
+      const first = Array.isArray(entries) ? entries[0] : entries;
+      let dlink = first && first.dlink;
+      if (Array.isArray(dlink)) dlink = dlink[0] && (dlink[0].dlink || dlink[0]);
+      addDlink(dlink);
+    }
+    if (dlinks.length) return dlinks;
+    throw new Error(lastError);
+  }
+
+  async function registerDownloadViaBridge(localPath, meta, ondup) {
+    const md5 = /^[0-9a-f]{32}$/i.test(String(meta.md5 || "")) ? String(meta.md5) : "";
+    const response = await bridgeFetch(
+      "/download/register",
+      "POST",
+      JSON.stringify({
+        local: localPath,
+        size: Number(meta.size) || 0,
+        md5,
+        ondup: ondup || "fail"
+      })
+    );
+    if (!response || !response.ok || !response.json || !response.json.token) {
+      throw new Error(
+        "download register 失败 " +
+          ((response && (response.error || (response.json && response.json.error))) ||
+            JSON.stringify(response)).slice(0, 300)
+      );
+    }
+    return response.json;
+  }
+
+  function sendDownloadMessage(message, fallbackError) {
+    return new Promise((resolve, reject) => {
+      safeRuntimeSendMessage(message, (response, runtimeError) => {
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || String(runtimeError)));
+          return;
+        }
+        if (!response || !response.ok) {
+          reject(new Error((response && response.error) || fallbackError));
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  function triggerPageContextDownload(dlink) {
+    // A hidden subframe makes the network request as part of the logged-in Pan
+    // document. A 403 response stays isolated in the frame instead of replacing
+    // the user's Netdisk tab; an attachment response becomes a Chrome download.
+    const frame = document.createElement("iframe");
+    frame.hidden = true;
+    frame.setAttribute("aria-hidden", "true");
+    frame.src = dlink;
+    (document.body || document.documentElement).appendChild(frame);
+    return () => frame.remove();
+  }
+
+  async function pageContextDownloadViaBackground(dlinks, registration, meta) {
+    const errors = [];
+    for (const dlink of dlinks) {
+      let captureId = "";
+      let removeFrame = null;
+      try {
+        const prepared = await sendDownloadMessage(
+          {
+            type: "download-page-prepare",
+            dlink,
+            token: registration.token,
+            expectedSize: Number(meta.size) || 0
+          },
+          "页面下载捕获准备失败"
+        );
+        captureId = prepared.captureId;
+        removeFrame = triggerPageContextDownload(dlink);
+        return await sendDownloadMessage(
+          { type: "download-page-await", captureId },
+          "页面下载捕获未返回结果"
+        );
+      } catch (error) {
+        errors.push(compactError(error, 240));
+      } finally {
+        if (removeFrame) removeFrame();
+        if (captureId) {
+          try {
+            await sendDownloadMessage(
+              { type: "download-page-cancel", captureId },
+              "取消页面下载捕获失败"
+            );
+          } catch (_) {}
+        }
+      }
+    }
+    throw new Error(compactError("全部页面上下文 dlink 候选失败 " + errors.join(" | ")));
+  }
+
+  async function nativeDownloadViaBackground(dlinks, registration, meta) {
+    let pageError = "";
+    try {
+      return await pageContextDownloadViaBackground(dlinks, registration, meta);
+    } catch (error) {
+      pageError = compactError(error, 300);
+    }
+    try {
+      return await sendDownloadMessage(
+        {
+          type: "download-native",
+          dlinks,
+          token: registration.token,
+          expectedSize: Number(meta.size) || 0
+        },
+        "Chrome 原生下载未返回结果"
+      );
+    } catch (error) {
+      throw new Error(
+        "页面上下文下载失败 " +
+          pageError +
+          "；扩展下载回退失败 " +
+          compactError(error, 300)
+      );
+    }
+  }
+
+  async function finishDownloadAtBridge(token, action) {
+    const response = await bridgeFetch(
+      "/download/" + encodeURIComponent(token) + "/" + action,
+      "POST",
+      "{}"
+    );
+    if (!response || !response.ok) {
+      throw new Error(
+        "download " +
+          action +
+          " 失败 " +
+          ((response && (response.error || (response.json && response.json.error))) ||
+            JSON.stringify(response)).slice(0, 300)
+      );
+    }
+    return response.json || { ok: true };
+  }
+
+  /**
+   * 网盘下载：网页登录态取得 dlink，优先由登录中的网盘文档触发附件请求，
+   * 捕获到隔离暂存区后由 bridge 校验大小与 MD5，再原子安装到目标。
+   */
+  async function downloadOne(task) {
+    const remotePath = task.path || task.remote;
+    if (!remotePath || !String(remotePath).startsWith("/")) {
+      throw new Error("download 需要网盘绝对路径 path");
+    }
+    const meta = await fileMeta(remotePath);
+    if (!meta) throw new Error("远端文件不存在: " + remotePath);
+    if (meta.isdir === 1 || meta.isdir === "1") {
+      throw new Error("download 当前只支持单个文件，不支持目录: " + remotePath);
+    }
+    const remoteName = meta.server_filename || remotePath.slice(remotePath.lastIndexOf("/") + 1);
+    const localPath =
+      task.local || task.local_path ||
+      (task.dest ? joinLocal(task.dest, task.newname || remoteName) : "");
+    if (!localPath) throw new Error("download 需要 local（完整本机路径）或 dest（本机目录）");
+    const ondup = String(task.ondup || "fail").toLowerCase();
+    if (ondup !== "fail" && ondup !== "overwrite") {
+      throw new Error("download ondup 仅支持 fail 或 overwrite");
+    }
+    const expectedSize = Number(meta.size) || 0;
+    if (expectedSize > WEB_DOWNLOAD_MAX_BYTES) {
+      throw new Error(
+        "网页下载安全上限为 50 MiB；已停止扩展下载，避免网页限制触发持续重试。请改用百度网盘客户端"
+      );
+    }
+
+    let registration = null;
+    try {
+      registration = await registerDownloadViaBridge(localPath, meta, ondup);
+      const dlinks = await panDownloadUrls(remotePath, meta);
+      log("下载开始 " + remotePath + " → " + registration.path + " size=" + Number(meta.size || 0));
+      const completed = await nativeDownloadViaBackground(dlinks, registration, meta);
+      log("下载完成 " + remotePath + " → " + completed.path);
+      return {
+        ok: true,
+        path: remotePath,
+        local: completed.path,
+        size: completed.size,
+        md5: completed.md5
+      };
+    } catch (error) {
+      if (registration && registration.token) {
+        try {
+          await finishDownloadAtBridge(registration.token, "abort");
+        } catch (_) {}
+      }
+      throw error;
+    }
+  }
+
   async function copyOne(item) {
     const path = item.path;
     const dest = item.dest;
@@ -506,6 +900,9 @@
     }
     if (task.op === "upload" || task.op === "upload_file") {
       return uploadOne(task);
+    }
+    if (task.op === "download" || task.op === "download_file") {
+      return downloadOne(task);
     }
     if (task.op === "copy") {
       return copyOne(task);
@@ -827,7 +1224,8 @@
   // —— UI ——
 
   function log(msg) {
-    const line = "[" + new Date().toLocaleTimeString() + "] " + msg;
+    const line =
+      "[" + new Date().toLocaleTimeString() + "] " + compactError(msg, ERROR_TEXT_MAX_CHARS);
     state.log.push(line);
     if (state.log.length > 200) state.log.shift();
     const el = document.getElementById("bpt-log");
@@ -891,27 +1289,42 @@
     return state.packs[state.activePackId] || null;
   }
 
-  async function persist() {
+  function persist() {
+    persistDirty = true;
     state.ignoreStorageReload = true;
-    try {
-      await chrome.storage.local.set({
-        packs: state.packs,
-        activePackId: state.activePackId
-      });
-    } catch (error) {
-      if (isContextInvalidatedError(error)) {
-        stopForInvalidatedContext(error);
-        return;
+    if (persistInFlight) return persistInFlight;
+    let current = null;
+    current = (async () => {
+      try {
+        // Coalesce bursts of status changes into at most one follow-up write.
+        // This avoids multiple concurrent full-pack serializations in Chrome.
+        do {
+          persistDirty = false;
+          await chrome.storage.local.set({
+            packs: state.packs,
+            activePackId: state.activePackId
+          });
+        } while (persistDirty && !state.contextInvalidated);
+      } catch (error) {
+        if (isContextInvalidatedError(error)) {
+          stopForInvalidatedContext(error);
+          return false;
+        }
+        log("状态持久化失败: " + compactError(error));
+        return false;
+      } finally {
+        if (persistInFlight === current) persistInFlight = null;
+        // 执行中保持屏蔽，避免 onChanged 用旧快照冲掉 done
+        if (!state.running) {
+          setTimeout(() => {
+            if (!state.running && !persistInFlight) state.ignoreStorageReload = false;
+          }, 100);
+        }
       }
-      throw error;
-    } finally {
-      // 执行中保持屏蔽，避免 50ms 后 onChanged 用旧快照冲掉 done
-      if (!state.running) {
-        setTimeout(() => {
-          if (!state.running) state.ignoreStorageReload = false;
-        }, 100);
-      }
-    }
+      return true;
+    })();
+    persistInFlight = current;
+    return current;
   }
 
   async function loadState() {
@@ -934,7 +1347,11 @@
     const t = pack.tasks.find((x) => x.id === taskId);
     if (!t) return;
     t.status = status;
-    if (result !== undefined) t.result = result;
+    if (result !== undefined) {
+      t.result = result && typeof result === "object" ? { ...result } : result;
+      if (t.result && t.result.error) t.result.error = compactError(t.result.error);
+      if (t.result && t.result.reason) t.result.reason = compactError(t.result.reason, 400);
+    }
     persist();
     render();
   }
@@ -956,6 +1373,21 @@
     return counts;
   }
 
+  function rejectRemainingQueue(queue, startIndex, reason) {
+    let rejected = 0;
+    for (let index = startIndex; index < queue.length; index++) {
+      const task = queue[index];
+      if (task.status !== "approved") continue;
+      setTaskStatus(task.id, "rejected", {
+        skipped: true,
+        error: compactError(reason),
+        reason: "自动批次已熔断，未再发起网络或磁盘操作"
+      });
+      rejected++;
+    }
+    return rejected;
+  }
+
   function reportRunToBridge(pack, status, extra) {
     if (!pack || !pack.id) return Promise.resolve();
     const tasks = (pack.tasks || []).map((t) => ({
@@ -963,9 +1395,9 @@
       op: t.op,
       path: t.path,
       status: t.status,
-      error: t.result && t.result.error,
+      error: t.result && compactError(t.result.error),
       skipped: !!(t.result && t.result.skipped),
-      reason: t.result && t.result.reason,
+      reason: t.result && compactError(t.result.reason, 400),
       result: t.result || null
     }));
     const body = JSON.stringify({
@@ -974,9 +1406,9 @@
       counts: countPackStatuses(pack),
       tasks,
       push_seq: pack.push_seq,
-      log_tail: state.log.slice(-40),
-      error: extra && extra.error,
-      ...(extra || {})
+      log_tail: state.log.slice(-20),
+      ...(extra || {}),
+      error: extra && compactError(extra.error)
     });
     return bridgeFetch("/run/result", "POST", body).then((resp) => {
       if (!resp.ok) log("回写 /run/result 失败: " + (resp.error || ""));
@@ -1031,6 +1463,9 @@
     const completedThisRun = new Set(
       pack.tasks.filter((x) => x.status === "done").map((x) => x.id)
     );
+    let processedThisRun = 0;
+    let consecutiveFailures = 0;
+    let circuitReason = "";
     try {
       getBdstoken();
     } catch (e) {
@@ -1043,7 +1478,8 @@
       render();
       return { ok: false, error: String(e.message || e) };
     }
-    for (const t of queue) {
+    for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+      const t = queue[queueIndex];
       const livePack = state.packs[pack.id] || pack;
       if (t.requires && t.requires.length) {
         const missing = [];
@@ -1058,6 +1494,15 @@
         if (missing.length) {
           log("跳过 " + t.id + "：依赖未完成 " + missing.join(", "));
           setTaskStatus(t.id, "failed", { error: "依赖未完成: " + missing.join(", ") });
+          processedThisRun++;
+          consecutiveFailures++;
+          if (auto && consecutiveFailures >= MAX_CONSECUTIVE_AUTO_FAILURES) {
+            circuitReason =
+              "连续 " + consecutiveFailures + " 个任务失败，自动批次已触发安全熔断";
+            rejectRemainingQueue(queue, queueIndex + 1, circuitReason);
+            log(circuitReason);
+            break;
+          }
           continue;
         }
       }
@@ -1069,11 +1514,18 @@
         if (r && r.ok === false) {
           setTaskStatus(t.id, "failed", r);
           log("失败 " + t.id + "：" + (r.error || "ok=false"));
-          if (t.risk === "high" || t.op === "delete" || t.op === "copy-batch") {
-            log("关键步骤失败，中止后续执行");
+          consecutiveFailures++;
+          const critical = t.risk === "high" || t.op === "delete" || t.op === "copy-batch";
+          if (critical || (auto && consecutiveFailures >= MAX_CONSECUTIVE_AUTO_FAILURES)) {
+            circuitReason = critical
+              ? "关键步骤失败，自动批次已中止"
+              : "连续 " + consecutiveFailures + " 个任务失败，自动批次已触发安全熔断";
+            rejectRemainingQueue(queue, queueIndex + 1, circuitReason);
+            log(circuitReason);
             break;
           }
         } else {
+          consecutiveFailures = 0;
           completedThisRun.add(t.id);
           setTaskStatus(t.id, "done", r);
           log(
@@ -1084,15 +1536,24 @@
           );
         }
       } catch (e) {
-        setTaskStatus(t.id, "failed", { error: String(e.message || e) });
-        log("失败 " + t.id + "：" + (e.message || e));
-        if (t.risk === "high" || t.op === "delete" || t.op === "copy-batch") {
-          log("关键步骤失败，中止后续执行");
+        const taskError = compactError(e);
+        setTaskStatus(t.id, "failed", { error: taskError });
+        log("失败 " + t.id + "：" + taskError);
+        consecutiveFailures++;
+        const critical = t.risk === "high" || t.op === "delete" || t.op === "copy-batch";
+        if (critical || (auto && consecutiveFailures >= MAX_CONSECUTIVE_AUTO_FAILURES)) {
+          circuitReason = critical
+            ? "关键步骤失败，自动批次已中止"
+            : "连续 " + consecutiveFailures + " 个任务失败，自动批次已触发安全熔断";
+          rejectRemainingQueue(queue, queueIndex + 1, circuitReason);
+          log(circuitReason);
           break;
         }
       }
+      processedThisRun++;
       // auto 模式每隔几步回写进度
-      if (auto && completedThisRun.size % 3 === 0) {
+      if (auto && processedThisRun % 3 === 0) {
+        await persist();
         await reportRunToBridge(state.packs[pack.id] || pack, "running");
       }
       await sleep(auto ? 250 : 400);
@@ -1102,6 +1563,7 @@
     state.autoRunningId = null;
     state.currentTaskId = null;
     const finalPack = state.packs[pack.id] || pack;
+    await persist();
     const counts = countPackStatuses(finalPack);
     let finalStatus = "done";
     if (counts.failed > 0 && counts.done === 0) finalStatus = "failed";
@@ -1116,9 +1578,9 @@
         " failed=" +
         counts.failed
     );
-    await reportRunToBridge(finalPack, finalStatus);
+    await reportRunToBridge(finalPack, finalStatus, circuitReason ? { error: circuitReason } : null);
     render();
-    return { ok: counts.failed === 0, status: finalStatus, counts };
+    return { ok: counts.failed === 0 && counts.rejected === 0, status: finalStatus, counts };
   }
 
   async function handleAutoRunPack(packId) {
@@ -1148,7 +1610,7 @@
           t.status = "approved";
         }
       }
-      persist();
+      await persist();
     }
     const approved = pack.tasks.filter((t) => t.status === "approved").length;
     if (!approved) {
@@ -1764,6 +2226,14 @@
         return { ok: false, error: String(e.message || e) };
       }
     }
+    if (op === "download" || op === "download_file") {
+      try {
+        const r = await downloadOne(params);
+        return { ok: !!(r && r.ok !== false), result: r };
+      } catch (e) {
+        return { ok: false, error: String(e.message || e) };
+      }
+    }
     if (op === "pack_status" || op === "pack-status") {
       // 优先内存；否则读 storage（F5 后仍可看到 failed.result）
       let packs = state.packs;
@@ -1895,7 +2365,11 @@
   mount();
   loadState().then(() => {
     render();
-    log("面板已就绪（connector 模式：CLI --auto 任务将自动执行）。");
+    log(
+      "面板已就绪 version=" +
+        chrome.runtime.getManifest().version +
+        "（connector 模式：CLI --auto 任务将自动执行）。"
+    );
     refreshConnector();
     if (state.contextInvalidated) return;
     state.connectorTimer = setInterval(refreshStoredConnection, 3000);

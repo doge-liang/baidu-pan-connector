@@ -51,10 +51,17 @@ def main() -> None:
     if missing:
         fail(f"required files missing: {missing}")
 
-    searchable = [SKILL / "SKILL.md", SKILL / "references" / "install.md"]
+    searchable = [
+        path
+        for path in SKILL.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in {".md", ".py", ".ps1", ".js", ".json", ".yaml", ".yml"}
+        and not any(part in {"dist", "__pycache__"} for part in path.parts)
+    ]
     for path in searchable:
-        if "tools\\connector.py" in path.read_text(encoding="utf-8"):
-            fail(f"stale nonexistent tools\\connector.py reference: {path}")
+        text = path.read_text(encoding="utf-8")
+        if re.search(r"(?:tools[\\/]|/tools/)connector\.py", text):
+            fail(f"stale nonexistent connector.py reference: {path}")
 
     tracked = subprocess.check_output(
         ["git", "ls-files", "skills/baidu-pan-connector"], cwd=ROOT, text=True
@@ -68,7 +75,13 @@ def main() -> None:
         path
         for path in tracked
         if "/tasks/" in path
-        and Path(path).name not in {".gitkeep", "example-mkdir.json", "example-upload.json"}
+        and Path(path).name
+        not in {
+            ".gitkeep",
+            "example-mkdir.json",
+            "example-upload.json",
+            "example-download.json",
+        }
     ]
     if forbidden or real_tasks:
         fail(f"runtime/generated files are tracked: {forbidden + real_tasks}")

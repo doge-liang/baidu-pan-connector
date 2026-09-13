@@ -15,18 +15,19 @@
 <body>
   <h1>Privacy Policy</h1>
   <p class="meta"><strong>Baidu Pan Agent Connector (Unofficial)</strong><br />
-  Effective date: 2026-08-07 · Last updated: 2026-08-07</p>
+  Effective date: 2026-08-07 · Last updated: 2026-08-10</p>
 
   <p>This extension is an <strong>unofficial capability connector</strong>. It does not provide an autonomous product experience by itself. A companion local Agent (and optional Skills) decides which operations to request; the extension executes them only in your browser session on Baidu Netdisk (pan.baidu.com).</p>
   <p>This extension is <strong>not affiliated with, endorsed by, or sponsored by Baidu</strong>.</p>
 
   <h2>1. Data the extension accesses</h2>
   <p>When you use the extension on a page where you are logged into Baidu Netdisk, it may read from that page context only what is needed to call Baidu’s same-origin web APIs for file listing and file-management operations (for example directory paths, file names, sizes, and temporary page tokens such as <code>bdstoken</code>). Those tokens are used in-memory for API requests and are <strong>not intentionally persisted</strong> by the extension as account credentials.</p>
-  <p>Task packs (JSON describing mkdir / move / rename / copy / delete-style operations) may be stored in <code>chrome.storage.local</code> on your device so the UI and background worker can track progress.</p>
+  <p>Task packs (JSON describing file-management and user-requested upload/download operations) may be stored in <code>chrome.storage.local</code> on your device so the UI and background worker can track progress.</p>
 
   <h2>2. Local bridge communication</h2>
   <p>The extension may poll a <strong>local-only</strong> HTTP service on <code>http://127.0.0.1:27865</code> or <code>http://localhost:27865</code> (the default companion task bridge run by your Agent toolchain). Communication is intended to stay on your machine. The extension does not phone home to the developer’s servers.</p>
   <p>If no local bridge is running, the connector simply cannot receive Agent-issued tasks over that channel.</p>
+  <p>For a user-requested upload, the extension reads file bytes from the local bridge and sends them to Baidu Netdisk. For a user-requested download, Chrome first writes an isolated connector staging file in the user's Downloads directory. The local bridge copies and verifies that file before installing the final local target, after which the extension removes the staging file and its download-history entry. The developer does not receive these file bytes.</p>
 
   <h2>3. What we do not collect</h2>
   <ul>
@@ -44,6 +45,7 @@
   <p>Network requests go to:</p>
   <ul>
     <li><code>https://pan.baidu.com/*</code> — Baidu Netdisk, under your existing login and Baidu’s terms;</li>
+    <li><code>https://yun.baidu.com/*</code>, <code>https://*.pcs.baidu.com/*</code>, and <code>https://*.baidupcs.com/*</code> — Baidu Netdisk web and file-transfer hosts;</li>
     <li><code>http://127.0.0.1:27865/*</code> and <code>http://localhost:27865/*</code> — your local Agent bridge only.</li>
   </ul>
   <p>Baidu’s handling of account and file data is governed by Baidu’s own privacy policy and terms of service. This document only covers the extension’s behavior.</p>
@@ -51,8 +53,12 @@
   <h2>6. Permissions (plain language)</h2>
   <ul>
     <li><strong>storage</strong> — save task packs and UI state on device.</li>
-    <li><strong>activeTab</strong> — interact with the tab you open for Netdisk / popup actions.</li>
+    <li><strong>downloads</strong> — stage requested downloads locally for verification and final placement, then remove the staging file and history entry.</li>
+    <li><strong>declarativeNetRequestWithHostAccess</strong> — temporarily apply a documented or source-matched Baidu Netdisk referrer and User-Agent profile to a requested Baidu data-host download; the rule is removed after the transfer and does not read or modify cookies.</li>
+    <li><strong>scripting</strong> — compute the short-lived download signature in the requesting Pan tab using the same-origin template-variable endpoint used by the current Netdisk page. The extension does not evaluate remotely supplied code; only the computed signature, timestamp, numeric VIP class, and a source label return to the isolated extension script. The injected function does not read cookies or modify page state.</li>
+    <li><strong>downloads</strong> — start and monitor an explicitly requested Baidu download, then remove its isolated staging file and local download-history entry after bridge verification.</li>
     <li><strong>Host: pan.baidu.com</strong> — run the content script and call same-origin Netdisk APIs while you are logged in.</li>
+    <li><strong>Hosts: yun.baidu.com / *.pcs.baidu.com / *.baidupcs.com</strong> — use Baidu Netdisk web and data-transfer endpoints for requested operations.</li>
     <li><strong>Host: 127.0.0.1 / localhost:27865</strong> — receive task packs and report results from/to the local Agent bridge.</li>
   </ul>
 

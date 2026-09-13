@@ -22,12 +22,20 @@ D:\project\baidu-pan-connector\
 Override the runtime root with the absolute path environment variable
 `BAIDU_PAN_CONNECTOR_STATE_DIR` when required.
 
+The runtime root stores only connector state, task packs, caches, and logs. Downloads are
+rejected when their target is inside this directory. Choose an explicit data directory,
+preferably on a non-system drive. The bridge also reserves 2 GiB beyond the expected file
+size by default; override this reserve with `BAIDU_PAN_DOWNLOAD_MIN_FREE_BYTES` only after
+checking the target volume. `BAIDU_PAN_ALLOW_STATE_DOWNLOADS=1` disables the runtime-target
+guard and is intended only for controlled tests, not normal use.
+
 ## Start and verify
 
 ```powershell
 $S = Join-Path $env:USERPROFILE ".codex\skills\baidu-pan-connector"
 powershell -File "$S\scripts\start_connector.ps1" -Background
 python -B "$S\scripts\check_install.py"
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 ```
 
 Load the unpacked Chrome extension from the canonical checkout:
@@ -42,9 +50,10 @@ open a logged-in `https://pan.baidu.com` tab. Reload the extension after updates
 ## Verify installation consistency
 
 ```powershell
-python -B "$S\scripts\sync_install.py" --check
+python -B "$S\scripts\sync_install.py" --check --require-source-link
 ```
 
-The check must pass before publishing or troubleshooting runtime behavior. The
-source directory contains only task examples; write real task packs under the
-external runtime `tasks` directory.
+The strict check must pass before publishing or troubleshooting runtime
+behavior. It proves the Codex Skill entry resolves to the canonical checkout.
+The source directory contains only task examples; write real task packs under
+the external runtime `tasks` directory.

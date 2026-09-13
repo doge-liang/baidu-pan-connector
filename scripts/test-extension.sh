@@ -18,7 +18,13 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const permissions = manifest.permissions || [];
 if (manifest.manifest_version !== 3) throw new Error('manifest_version must be 3');
 if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error('version must be x.y.z');
-if (permissions.length !== 1 || permissions[0] !== 'storage') {
+if (
+  permissions.length !== 4 ||
+  permissions[0] !== 'storage' ||
+  permissions[1] !== 'downloads' ||
+  permissions[2] !== 'declarativeNetRequestWithHostAccess' ||
+  permissions[3] !== 'scripting'
+) {
   throw new Error(`unexpected permissions: ${JSON.stringify(permissions)}`);
 }
 for (const size of ['16', '48', '128']) {

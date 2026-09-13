@@ -186,7 +186,7 @@ def main() -> None:
         help="all=含删除；safe=跳过 delete/high",
     )
     p_push.add_argument("--wait", action="store_true", help="等待执行结束")
-    p_push.add_argument("--timeout", type=float, default=600)
+    p_push.add_argument("--timeout", type=float, default=3600)
     p_push.add_argument("--interval", type=float, default=2.0)
     p_push.set_defaults(func=cmd_push)
 
@@ -196,7 +196,7 @@ def main() -> None:
 
     p_w = sub.add_parser("wait", help="等待某 pack 执行结束")
     p_w.add_argument("pack_id")
-    p_w.add_argument("--timeout", type=float, default=600)
+    p_w.add_argument("--timeout", type=float, default=3600)
     p_w.add_argument("--interval", type=float, default=2.0)
     p_w.set_defaults(func=cmd_wait)
 

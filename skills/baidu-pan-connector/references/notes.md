@@ -18,10 +18,11 @@
 | 通道 | Chrome 扩展 + 本机 bridge | `bdpan` OpenAPI CLI |
 | 路径 | 账号可见的**全树**绝对路径 | 通常限 `/apps/bdpan/` |
 | 上传本地文件 | **有**（`upload` + bridge register） | 有 |
-| 下载本地 / 转存 / 分享 | **无** | 有 |
+| 下载到本地 | **有**（`download` + bridge 原子落盘） | 有 |
+| 转存分享链接 / 生成分享 | **无** | 有 |
 | 记忆备份 | 无 | 有 |
 
-本机上传用本 skill 的 `upload`。下载到本地、转存分享链接、生成分享：用 **baidu-drive** 或网页。
+本机上传与下载用本 skill 的 `upload` / `download`。转存分享链接、生成分享仍使用 **baidu-drive** 或网页。
 
 ## Agent 硬约束
 
